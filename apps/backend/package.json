@@ -21,7 +21,7 @@
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",
     "express": "^5.2.1",
-    "multer": "^2.3.0",
+    "multer": "^2.4.0",
     "sharp": "0.35.4",
     "socket.io": "^4.8.1"
   },
@@ -29,11 +29,11 @@
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
-    "@types/multer": "^2.0.0",
+    "@types/multer": "^2.2.0",
     "@types/node": "^25.0.0",
     "@types/supertest": "^6.0.3",
     "supertest": "^7.1.4",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.13",
     "typescript": "^5.9.3",
     "vitest": "^4.0.14"
   }
