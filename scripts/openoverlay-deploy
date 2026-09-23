@@ -12,7 +12,18 @@ if [[ -f "$BACKUP_CONFIG_FILE" ]]; then
 fi
 readonly BACKUP_ROOT="${OPENOVERLAY_BACKUP_ROOT:-${configured_backup_root:-/var/backups/openoverlay}}"
 readonly BACKUP_SCRIPT="${OPENOVERLAY_BACKUP_SCRIPT:-/usr/local/libexec/openoverlay/openoverlay-backup.mjs}"
-readonly CONTROL_SOCKET="${OPENOVERLAY_CONTROL_SOCKET:-/run/openoverlay/gateway-control.sock}"
+readonly IMMUTABLE_CONTROL_SOCKET="/run/openoverlay/gateway-control.sock"
+readonly LEGACY_CONTROL_SOCKET="${OPENOVERLAY_LEGACY_CONTROL_SOCKET:-/run/user/$(id -u skylarenns 2>/dev/null || printf 1000)/openoverlay/gateway-control.sock}"
+select_control_socket() {
+  if [[ -S "$IMMUTABLE_CONTROL_SOCKET" ]]; then
+    printf '%s' "$IMMUTABLE_CONTROL_SOCKET"
+  elif [[ ! -L "$RELEASE_ROOT/current" && -S "$LEGACY_CONTROL_SOCKET" ]]; then
+    printf '%s' "$LEGACY_CONTROL_SOCKET"
+  else
+    printf '%s' "$IMMUTABLE_CONTROL_SOCKET"
+  fi
+}
+readonly CONTROL_SOCKET="${OPENOVERLAY_CONTROL_SOCKET:-$(select_control_socket)}"
 readonly LOCK_FILE="${OPENOVERLAY_LOCK_FILE:-/run/lock/openoverlay-deploy.lock}"
 readonly SERVICE_NAME="${OPENOVERLAY_SERVICE_NAME:-Openoverlaybackend.service}"
 readonly DATABASE_PATH="${OPENOVERLAY_DATABASE_PATH:-/var/lib/openoverlay/openoverlay.sqlite}"
@@ -157,6 +168,9 @@ build_release() {
     import { pathToFileURL } from "node:url";
     const backend = await import(pathToFileURL(path.join(process.env.RELEASE_PATH, "apps/backend/dist/db.js")).href);
     const shared = await import(pathToFileURL(path.join(process.env.RELEASE_PATH, "packages/shared/dist/compatibility.js")).href);
+    if (!Number.isSafeInteger(backend.CURRENT_SCHEMA_VERSION) || !Number.isSafeInteger(backend.CURRENT_READER_VERSION)) {
+      throw new Error("release backend does not export its schema reader contract");
+    }
     const manifest = {
       formatVersion: 1,
       releaseSha: process.env.RELEASE_SHA,
@@ -194,8 +208,11 @@ wait_for_release() {
     if HEALTH_JSON="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/health 2>/dev/null)" \
       GATEWAY_JSON="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/_openoverlay/gateway 2>/dev/null)" \
       EXPECTED_SHA="$sha" /usr/bin/node -e '
-        const health=JSON.parse(process.env.HEALTH_JSON);
-        const gateway=JSON.parse(process.env.GATEWAY_JSON);
+        let health, gateway;
+        try {
+          health=JSON.parse(process.env.HEALTH_JSON);
+          gateway=JSON.parse(process.env.GATEWAY_JSON);
+        } catch { process.exit(1); }
         const sha=process.env.EXPECTED_SHA;
         process.exit(health.ok === true && health.build?.commit === sha && gateway.ok === true && gateway.gatewayBuild?.commit === sha && gateway.activeBuild?.commit === sha ? 0 : 1);
       '; then
@@ -242,6 +259,9 @@ promote_release() {
   new_privacy="$(RELEASE_MANIFEST="$release/release-manifest.json" "$NODE_BIN" -e 'process.stdout.write(String(require(process.env.RELEASE_MANIFEST).privacyEpoch || 0))')"
   if [[ -n "$old_current" && -f "$old_current/release-manifest.json" ]]; then
     old_privacy="$(RELEASE_MANIFEST="$old_current/release-manifest.json" "$NODE_BIN" -e 'process.stdout.write(String(require(process.env.RELEASE_MANIFEST).privacyEpoch || 0))')"
+  fi
+  if [[ -n "$old_current" ]] && ! (( new_privacy >= 1 && old_privacy < 1 )); then
+    assert_rollback_compatible "$old_current"
   fi
   if (( new_privacy >= 1 && old_privacy < 1 )); then
     systemctl stop "$SERVICE_NAME" || fail "could not stop privacy-incompatible backend before cutover"

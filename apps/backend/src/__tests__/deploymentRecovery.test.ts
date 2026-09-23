@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
@@ -14,6 +15,25 @@ afterEach(() => {
 });
 
 describe("immutable release recovery", () => {
+  it("discovers the legacy gateway control socket before immutable activation", async () => {
+    const fixture = createFixture();
+    fs.unlinkSync(path.join(fixture.directory, "current"));
+    const legacySocket = `/tmp/oo-legacy-${process.pid}-${Date.now()}.sock`;
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => server.once("error", reject).listen(legacySocket, resolve));
+    try {
+      const result = runFixture(fixture, 'printf "%s" "$CONTROL_SOCKET"', true, {
+        OPENOVERLAY_CONTROL_SOCKET: "",
+        OPENOVERLAY_LEGACY_CONTROL_SOCKET: legacySocket
+      });
+      expect(result.status).toBe(0);
+      expect(result.stdout).toBe(legacySocket);
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      fs.rmSync(legacySocket, { force: true });
+    }
+  });
+
   it("accepts tracked environment examples but rejects a mismatched archive commit", () => {
     const fixture = createFixture();
     const repository = path.join(fixture.directory, "archive-source");
@@ -71,6 +91,24 @@ describe("immutable release recovery", () => {
     );
     expect(result.status).toBe(1);
     expect(result.stderr).toMatch(/rolled back/);
+    expect(fs.realpathSync(path.join(fixture.directory, "current"))).toBe(fixture.oldRelease);
+  });
+
+  it("refuses an epoch-zero promotion before switching away from a release without a reader contract", () => {
+    const fixture = createFixture();
+    fs.writeFileSync(path.join(fixture.oldRelease, "release-manifest.json"), JSON.stringify({ privacyEpoch: 0 }));
+    const result = runFixture(
+      fixture,
+      `
+      systemctl() { :; }
+      wait_for_release() { :; }
+      promote_release "$NEW_SHA" "$NEW_RELEASE"
+    `,
+      false
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toMatch(/previous release has no schema reader contract/);
     expect(fs.realpathSync(path.join(fixture.directory, "current"))).toBe(fixture.oldRelease);
   });
 

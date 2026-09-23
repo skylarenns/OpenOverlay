@@ -43,5 +43,5 @@ printf '%s\n' 'deploy-openoverlay ALL=(root) NOPASSWD: /usr/local/sbin/openoverl
 chmod 0440 "$SUDOERS"
 visudo -cf "$SUDOERS"
 systemctl daemon-reload
-systemctl enable openoverlay-cloudflared-version-check.timer
+systemctl enable --now openoverlay-cloudflared-version-check.timer
 printf 'Immutable candidate staged. Active backend unit and runtime data ownership remain unchanged. Install verified backups separately.\n'
