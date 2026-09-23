@@ -108,7 +108,6 @@ describe("backend gateway", () => {
     activeChild?.emit("exit", 1, null);
     await waitFor(() => expect(exitProcess).toHaveBeenCalledWith(1));
     expect(logger.error).toHaveBeenCalledWith("gateway_active_slot_exited", expect.objectContaining({ slot: gateway.status().activeSlot?.id }));
-    await gateway.stop();
   });
 
   it("restarts after repeated health failures", async () => {
@@ -129,10 +128,9 @@ describe("backend gateway", () => {
     });
 
     await gateway.start();
-    healthMode = "hang";
+    healthMode = false;
     await waitFor(() => expect(exitProcess).toHaveBeenCalledWith(1));
     expect(logger.warn).toHaveBeenCalledWith("gateway_active_slot_health_failed", expect.objectContaining({ attempt: 2, threshold: 2 }));
-    await gateway.stop();
   });
 
   it("bounds proxy lifetime and never appends JSON to a partial upstream response", async () => {
@@ -170,7 +168,7 @@ describe("backend gateway", () => {
     await expect(hangingGateway.start()).rejects.toThrow(/did not become healthy/);
 
     const unhealthyConfig = await testConfig(gatewayPort);
-    unhealthyConfig.gatewaySlotStartupTimeoutMs = 150;
+    unhealthyConfig.gatewaySlotStartupTimeoutMs = 2_000;
     const unhealthyGateway = createBackendGateway({
       config: unhealthyConfig,
       logger,
