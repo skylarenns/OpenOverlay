@@ -87,8 +87,8 @@ export interface EventLogRow {
 
 const MAX_EVENT_LOGS_PER_PRESET = 1_000;
 const MAX_EVENT_PAYLOAD_BYTES = 4 * 1024;
-const CURRENT_SCHEMA_VERSION = 3;
-const CURRENT_READER_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 3;
+export const CURRENT_READER_VERSION = 3;
 
 export class Database {
   private readonly db: DatabaseSync;
