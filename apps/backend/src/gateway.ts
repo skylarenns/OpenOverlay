@@ -650,6 +650,8 @@ function delay(ms: number): Promise<void> {
 }
 
 if (process.env.OPENOVERLAY_GATEWAY_ENTRYPOINT === "1") {
+  // This branch is only for the failed-startup rollback rehearsal.
+  if (process.env.OPENOVERLAY_STARTUP_REHEARSAL !== "skip") throw new Error("Deliberate epoch-zero startup failure rehearsal");
   const config = loadConfig();
   const logger = createLogger(config.logFile);
   const gateway = createBackendGateway({ config, logger });
