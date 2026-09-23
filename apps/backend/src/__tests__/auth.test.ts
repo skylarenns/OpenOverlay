@@ -171,5 +171,11 @@ describe("auth", () => {
     const reads = new AuthRateLimiter();
     for (let index = 0; index < 120; index += 1) reads.reserveSensitiveRead("user-1", "127.0.0.3", 1_000);
     expect(() => reads.reserveSensitiveRead("user-1", "127.0.0.3", 1_000)).toThrow(/Too many sensitive read requests/);
+
+    const unauthenticated = new AuthRateLimiter();
+    for (let index = 0; index < 240; index += 1) unauthenticated.reserveSensitiveReadIp("127.0.0.4", 1_000);
+    expect(() => unauthenticated.reserveSensitiveReadIp("127.0.0.4", 1_000)).toThrow(/Too many sensitive read requests/);
+    for (let index = 0; index < 1_200; index += 1) unauthenticated.reserveWriteIp("127.0.0.5", 1_000);
+    expect(() => unauthenticated.reserveWriteIp("127.0.0.5", 1_000)).toThrow(/Too many write requests/);
   });
 });
