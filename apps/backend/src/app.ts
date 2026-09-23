@@ -325,10 +325,10 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
       next();
       return;
     }
+    authRateLimiter.reserveWriteIp(req.ip || "unknown");
     if (req.method !== "DELETE") {
       assertStorageHeadroom(ctx, path.dirname(ctx.config.databasePath), DATABASE_WRITE_HEADROOM_BYTES);
     }
-    authRateLimiter.reserveWriteIp(req.ip || "unknown");
     const user = authenticatedUser(req, ctx);
     if (user) authRateLimiter.reserveWriteIdentity(user.id);
     next();
