@@ -147,7 +147,10 @@ test("sidebar supports dark mode, narrow screens, keyboard collapse, and reduced
     await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const brand = page.locator(".sidebar-brand-text");
-    expect(await brand.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    // The sidebar can still be resizing after navigation first becomes visible.
+    await expect
+      .poll(() => brand.evaluate((element) => element.scrollWidth - element.clientWidth), { message: `Sidebar brand fits at ${width}px` })
+      .toBeLessThanOrEqual(0);
     await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`sidebar-${width}.png`) });
   }
 
