@@ -118,6 +118,19 @@ describe("auth", () => {
     await server.agent.post("/api/teams").set("Origin", "http://localhost:5173").send({ fullName: "Local FC", shortName: "Local" }).expect(201);
   });
 
+  it("requires an allowed origin for production cookie writes", async () => {
+    server.close();
+    server = makeTestServer({ env: "production", jwtSecret: "x".repeat(32) });
+    const signupResponse = await server.request.post("/api/auth/signup").send({ email: "prod-origin@example.com", password: "password123" }).expect(201);
+    const setCookie = signupResponse.headers["set-cookie"];
+    const cookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(";", 1)[0]!;
+    const payload = { fullName: "Allowed FC", shortName: "Allowed" };
+
+    await server.request.post("/api/teams").set("Cookie", cookie).send(payload).expect(403);
+    await server.request.post("/api/teams").set("Cookie", cookie).set("Origin", "https://evil.example").send(payload).expect(403);
+    await server.request.post("/api/teams").set("Cookie", cookie).set("Origin", "http://localhost:5173").send(payload).expect(201);
+  });
+
   it("fails closed for invalid environments and weak production secrets", () => {
     expect(() => loadConfig({ env: "prod" as "production", jwtSecret: "x".repeat(32) })).toThrow(/Invalid NODE_ENV/);
     expect(() => loadConfig({ env: "production", jwtSecret: "short" })).toThrow(/at least 32 bytes/);

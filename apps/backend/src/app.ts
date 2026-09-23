@@ -166,6 +166,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     })
   );
   app.use(express.json({ limit: MAX_JSON_REQUEST_BYTES }));
+  // codeql[js/missing-token-validation] csrfOriginGuard rejects cross-origin and originless production cookie writes below.
   app.use(cookieParser());
   app.use((req, _res, next) => {
     req.ctx = ctx;
@@ -289,6 +290,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ user: serializeUser(req.user!) });
   });
 
+  // codeql[js/missing-rate-limiting] reserveSensitiveRead bounds this authenticated file read by user and IP.
   api.get("/operations/backup", requireAuth, (req, res) => {
     authRateLimiter.reserveSensitiveRead(req.user!.id, req.ip || "unknown");
     const statusFile = path.join(path.dirname(ctx.config.databasePath), "backup-status.json");
@@ -412,6 +414,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ preset: serializePreset(row, ctx) });
   });
 
+  // codeql[js/missing-rate-limiting] reserveSensitiveRead bounds disclosure of the stage capability by user and IP.
   api.get("/presets/:id/stage", requireAuth, (req, res) => {
     authRateLimiter.reserveSensitiveRead(req.user!.id, req.ip || "unknown");
     const row = db.getPresetForUser(routeParam(req, "id"), req.user!.id);
@@ -420,6 +423,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ stageKey: row.stage_key, publicId: row.public_id });
   });
 
+  // codeql[js/missing-rate-limiting] The API-wide write guard calls reserveWrite before this route.
   api.post("/presets/:id/stage/rotate", requireAuth, (req, res) => {
     const row = db.setStageKey(routeParam(req, "id"), req.user!.id, true);
     if (!row) return void res.status(404).json({ error: "Preset not found" });
@@ -428,6 +432,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ stageKey: row.stage_key, publicId: row.public_id });
   });
 
+  // codeql[js/missing-rate-limiting] The API-wide write guard calls reserveWrite before this route.
   api.delete("/presets/:id/stage", requireAuth, (req, res) => {
     const row = db.setStageKey(routeParam(req, "id"), req.user!.id, false);
     if (!row) return void res.status(404).json({ error: "Preset not found" });
