@@ -109,7 +109,9 @@ receive_archive() {
 
 verify_archive() {
   local archive="$1" expected_sha="$2" count=0 entry archive_sha
-  archive_sha="$(gzip -dc "$archive" | git get-tar-commit-id)" || fail "archive lacks a Git commit identity"
+  # git get-tar-commit-id reads only the PAX header. Drain the rest so gzip
+  # finishes normally under pipefail for real release-sized archives.
+  archive_sha="$(gzip -dc "$archive" | { git get-tar-commit-id || exit 1; cat >/dev/null; })" || fail "archive lacks a Git commit identity"
   [[ "$archive_sha" == "$expected_sha" ]] || fail "archive Git commit does not match the requested release SHA"
   while IFS= read -r entry; do
     count=$((count + 1))

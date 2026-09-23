@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -15,6 +16,10 @@ afterEach(() => {
 });
 
 describe("release archive validation", () => {
+  it("reads Git identity from a release larger than the pipe buffer", () => {
+    expect(validateArchive([{ name: "large.txt", content: randomBytes(256 * 1024).toString("base64") }]).status).toBe(0);
+  });
+
   it("accepts bounded regular files and rejects traversal and links", () => {
     expect(validateArchive([{ name: "package.json", content: "{}" }]).status).toBe(0);
 

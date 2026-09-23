@@ -22,7 +22,7 @@ The installer copies the backup program to `/usr/local/libexec/openoverlay`, wri
 
 ## 3. Rehearse immutable activation with the current application
 
-A root-capable operator runs `bash scripts/bootstrap-release-host.sh` from the reviewed source. This installs the immutable candidate unit and deployment entrypoint without replacing the active legacy unit or changing `/var/lib/openoverlay` ownership. The first repair commit changes recovery and deployment tooling without the stage application changes. It passed config, 283 unit/integration tests, and production builds in an isolated checkout. From a Git checkout containing that commit:
+A root-capable operator runs `bash scripts/bootstrap-release-host.sh` from the latest reviewed repair source, which includes the full-size archive verifier fix. This installs the immutable candidate unit and deployment entrypoint without replacing the active legacy unit or changing `/var/lib/openoverlay` ownership. The first repair commit changes recovery and deployment tooling without the stage application changes. It passed config, 283 unit/integration tests, and production builds in an isolated checkout. Use that first commit only as the candidate archive:
 
 ```bash
 infra_sha=285077d2522cdf1b82dfdb6a147a4d69ed80d4ea
