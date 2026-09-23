@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import { stageRestore } from "../../../../scripts/openoverlay-restore-stage.mjs";
+import { restoreBuildSha } from "../../../../scripts/openoverlay-restore-identity.mjs";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../../../..");
 const backupScript = path.join(repositoryRoot, "scripts/openoverlay-backup.mjs");
@@ -15,6 +16,23 @@ afterEach(() => {
 });
 
 describe("backup and restore evidence", () => {
+  it("verifies a restored snapshot with the candidate release identity", () => {
+    const fixture = createFixture();
+    const release = path.join(fixture.directory, "release");
+    const artifact = path.join(release, "apps/backend/dist");
+    const snapshotSha = "a".repeat(40);
+    const candidateSha = "b".repeat(40);
+    fs.mkdirSync(artifact, { recursive: true });
+    fs.writeFileSync(path.join(release, "release-manifest.json"), JSON.stringify({ releaseSha: candidateSha }));
+    fs.writeFileSync(path.join(artifact, ".openoverlay-build-commit"), `${candidateSha}\n`);
+
+    expect(restoreBuildSha(release, snapshotSha)).toBe(candidateSha);
+    fs.writeFileSync(path.join(artifact, ".openoverlay-build-commit"), `${snapshotSha}\n`);
+    expect(() => restoreBuildSha(release, snapshotSha)).toThrow(/artifact identity/);
+    fs.rmSync(path.join(release, "release-manifest.json"));
+    expect(restoreBuildSha(release, snapshotSha)).toBe(snapshotSha);
+  });
+
   it("creates a checksum-complete online snapshot and resolves a retained delete tombstone", () => {
     const fixture = createFixture();
     const result = runBackup([

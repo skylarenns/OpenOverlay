@@ -8,6 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { DatabaseSync, backup } from "node:sqlite";
 import { stageRestore } from "./openoverlay-restore-stage.mjs";
+import { restoreBuildSha } from "./openoverlay-restore-identity.mjs";
 
 const FORMAT_VERSION = 1;
 const TOOL_VERSION = "1.0.0";
@@ -211,6 +212,7 @@ async function verifyRestore(options) {
   const snapshot = path.resolve(requiredOption(options, "snapshot"));
   const release = path.resolve(options.release || "/opt/openoverlay/current");
   const manifest = await verifySnapshot(snapshot, true);
+  const releaseSha = restoreBuildSha(release, manifest.buildSha);
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "openoverlay-restore-"));
   let child;
   try {
@@ -231,7 +233,7 @@ async function verifyRestore(options) {
         JWT_SECRET: "restore-verification-only-secret",
         CORS_ORIGINS: "http://127.0.0.1:5173",
         FRONTEND_URL: "http://127.0.0.1:5173",
-        OPENOVERLAY_GIT_SHA: manifest.buildSha
+        OPENOVERLAY_GIT_SHA: releaseSha
       },
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -240,7 +242,7 @@ async function verifyRestore(options) {
       stderr += String(chunk);
     });
     try {
-      await waitForHealth(port, manifest.buildSha);
+      await waitForHealth(port, releaseSha);
       const email = `restore-${randomUUID()}@example.invalid`;
       const signup = await jsonRequest(port, "/api/v1/auth/signup", "POST", { email, password: `Restore-${randomUUID()}` });
       if (signup.status !== 201) throw new Error(`Restore auth smoke failed with HTTP ${signup.status}`);
@@ -267,7 +269,7 @@ async function verifyRestore(options) {
           if (!expected || bytes.length !== expected.byteSize || sha256 !== expected.sha256) throw new Error(`Restored ${kind} bytes do not match snapshot`);
         }
       }
-      console.log(JSON.stringify({ ok: true, snapshot, release, buildSha: manifest.buildSha, smoke: ["auth", "preset", "media", "media-bytes"] }));
+      console.log(JSON.stringify({ ok: true, snapshot, release, buildSha: manifest.buildSha, releaseSha, smoke: ["auth", "preset", "media", "media-bytes"] }));
     } catch (error) {
       throw new Error(`${error instanceof Error ? error.message : String(error)}${stderr ? `; backend: ${stderr.slice(-500)}` : ""}`);
     }
