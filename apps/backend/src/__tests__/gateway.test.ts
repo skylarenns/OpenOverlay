@@ -73,7 +73,7 @@ describe("backend gateway", () => {
 
     await waitFor(async () => {
       const state = await controlStatus(config.gatewayControlSocket);
-      expect(state.connections).toEqual({ overlay: 1, preview: 1, admin: 1, unknown: 1, total: 4 });
+      expect(state.connections).toEqual({ overlay: 1, preview: 1, stage: 0, admin: 1, unknown: 1, total: 4 });
       expect(state.inFlightMutations).toBe(1);
       expect(state.activeChildHealthy).toBe(true);
       expect(state.gatewayHealthy).toBe(true);

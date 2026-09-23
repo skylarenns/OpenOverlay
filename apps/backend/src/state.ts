@@ -1,5 +1,6 @@
 import {
   CHURCH_BACKGROUND_PRESETS,
+  MAX_PRESET_STATE_BYTES,
   type ActiveGraphic,
   type ChurchState,
   type GraphicKind,
@@ -9,6 +10,7 @@ import {
   type PresetType,
   type SoccerState,
   clockIsAtStop,
+  churchOnAirSlide,
   createDefaultPresetState,
   createNewPresetState,
   defaultElement,
@@ -326,7 +328,7 @@ export function ensurePresetState(type: "soccer" | "church" | "custom", name: st
 
 export function validatePresetState(type: PresetType, name: string, value: unknown): PresetState {
   assertSafeJsonValue(value);
-  if (Buffer.byteLength(JSON.stringify(value), "utf8") > 512 * 1024) throw new PresetStateValidationError("State is too large");
+  if (Buffer.byteLength(JSON.stringify(value), "utf8") > MAX_PRESET_STATE_BYTES) throw new PresetStateValidationError("State is too large");
   const template = createDefaultPresetState(type, name);
   assertMatchesTemplate(value, template, "state");
   let cloned = structuredClone(value) as PresetState;
@@ -350,7 +352,7 @@ export function validatePresetState(type: PresetType, name: string, value: unkno
   }
   // Canonicalization can add derived fields. Enforce the persistence boundary
   // against the object that will actually be stored, not only the input.
-  if (Buffer.byteLength(JSON.stringify(cloned), "utf8") > 512 * 1024) throw new PresetStateValidationError("State is too large");
+  if (Buffer.byteLength(JSON.stringify(cloned), "utf8") > MAX_PRESET_STATE_BYTES) throw new PresetStateValidationError("State is too large");
   return cloned;
 }
 
@@ -358,8 +360,110 @@ export function readStoredPresetState(row: { type: PresetType; name: string; sta
   try {
     return { state: validatePresetState(row.type, row.name, JSON.parse(row.state_json) as unknown), recovered: false };
   } catch {
-    return { state: createDefaultPresetState(row.type, row.name), recovered: true };
+    return { state: createOffAirRecoveryState(row.type, row.name), recovered: true };
   }
+}
+
+function createOffAirRecoveryState(type: PresetType, name: string): PresetState {
+  const state = createNewPresetState(type, name);
+  state.activeGraphics = [];
+  if (isSoccerState(state)) {
+    state.soccerPackage.activeOverlay = null;
+    state.soccerPackage.countdown = { ...state.soccerPackage.countdown, running: false, startedAtMs: null };
+    state.clock = { ...state.clock, running: false, startedAtMs: null };
+    for (const element of Object.values(state.elements)) element.visible = false;
+  } else if (isChurchState(state)) {
+    state.onAirSlide = null;
+    state.stageMessage = undefined;
+    for (const element of Object.values(state.elements)) element.visible = false;
+  } else {
+    for (const element of state.elements) element.visible = false;
+  }
+  return state;
+}
+
+export function publicOverlayState(state: PresetState): PresetState {
+  if (!isChurchState(state)) return state;
+  const displayed = state.elements.fullscreenSlide.visible ? churchOnAirSlide(state) : null;
+  const slide: ChurchState["slides"][number] | null = displayed
+    ? {
+        id: displayed.id,
+        title: displayed.title,
+        type: displayed.type,
+        text: displayed.text,
+        mediaUrl: displayed.mediaUrl,
+        section: displayed.section,
+        backgroundColor: displayed.backgroundColor,
+        textColor: displayed.textColor,
+        variant: displayed.variant,
+        label: displayed.label,
+        reference: displayed.reference,
+        fontSize: displayed.fontSize,
+        textAlign: displayed.textAlign,
+        backgroundDim: displayed.backgroundDim,
+        backgroundPreset: displayed.backgroundPreset,
+        backgroundMotion: displayed.backgroundMotion
+      }
+    : null;
+  const publicElement = (element: OverlayElementConfig): OverlayElementConfig => ({
+    id: element.id,
+    visible: element.visible,
+    placement: {
+      x: element.placement.x,
+      y: element.placement.y,
+      width: element.placement.width,
+      height: element.placement.height,
+      scale: element.placement.scale,
+      preset: element.placement.preset
+    },
+    variant: element.variant,
+    accentColor: element.accentColor,
+    font: element.font
+  });
+  return {
+    serviceTitle: "",
+    sections: slide ? [slide.section] : [],
+    slides: slide ? [slide] : [],
+    selectedSlideId: slide?.id,
+    onAirSlide: slide,
+    blackout: state.blackout,
+    textCleared: state.textCleared,
+    style: {
+      font: state.style.font,
+      accentColor: state.style.accentColor,
+      backgroundMode: state.style.backgroundMode,
+      backgroundColor: state.style.backgroundColor,
+      theme: state.style.theme,
+      animation: state.style.animation
+    },
+    elements: {
+      lowerThird: publicElement(state.elements.lowerThird),
+      countdown: publicElement(state.elements.countdown),
+      fullscreenSlide: publicElement(state.elements.fullscreenSlide)
+    },
+    activeGraphics: state.activeGraphics
+      .filter((graphic) => graphic.kind === "countdown" || graphic.kind === "lower-third" || graphic.kind === "church-lower-third")
+      .map((graphic) => ({
+        id: graphic.id,
+        kind: graphic.kind,
+        title: graphic.title,
+        subtitle: graphic.subtitle,
+        label: graphic.label,
+        team: graphic.team,
+        variant: graphic.variant,
+        placement: {
+          x: graphic.placement.x,
+          y: graphic.placement.y,
+          width: graphic.placement.width,
+          height: graphic.placement.height,
+          scale: graphic.placement.scale,
+          preset: graphic.placement.preset
+        },
+        startedAtMs: graphic.startedAtMs,
+        durationMs: graphic.durationMs,
+        expiresAtMs: graphic.expiresAtMs
+      }))
+  };
 }
 
 function applySoccerAction(state: SoccerState, action: PresetAction, payload: Record<string, unknown>, nowMs: number): SoccerState {
@@ -540,7 +644,7 @@ function applySoccerAction(state: SoccerState, action: PresetAction, payload: Re
 
 function applyChurchAction(state: ChurchState, action: PresetAction, payload: Record<string, unknown>, nowMs: number): ChurchState {
   if (action === "trigger-lower-third") {
-    const selectedSlide = state.slides.find((slide) => slide.id === state.selectedSlideId) || state.slides[0];
+    const selectedSlide = state.slides.find((slide) => slide.id === state.selectedSlideId);
     const lowerThirdPayload = { durationSeconds: 0, ...payload };
     const graphic = makeGraphic(
       "church-lower-third",
@@ -835,6 +939,13 @@ function assertDomainConstraints(type: PresetType, state: PresetState): void {
       throw new PresetStateValidationError("state.soccerPackage.packageBackgroundOpacity must be between 0 and 1");
     if (state.soccerPackage.scorebugWidth < 44 || state.soccerPackage.scorebugWidth > 82)
       throw new PresetStateValidationError("state.soccerPackage.scorebugWidth must be between 44 and 82");
+    if (state.clock.running && (!Number.isSafeInteger(state.clock.startedAtMs) || (state.clock.startedAtMs ?? 0) <= 0))
+      throw new PresetStateValidationError("Running match clock needs a valid start timestamp");
+    if (
+      state.soccerPackage.countdown.running &&
+      (!Number.isSafeInteger(state.soccerPackage.countdown.startedAtMs) || (state.soccerPackage.countdown.startedAtMs ?? 0) <= 0)
+    )
+      throw new PresetStateValidationError("Running countdown needs a valid start timestamp");
     assertBoundedString(state.gameTitle, "state.gameTitle", 200);
     assertBoundedString(state.productionName, "state.productionName", 200);
     assertBoundedString(state.scheduledAt, "state.scheduledAt", 100);

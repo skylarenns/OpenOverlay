@@ -9,7 +9,7 @@ import { getBuildInfo } from "./buildInfo.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import { createLogger, type Logger } from "./logger.js";
 
-type RealtimeClientKind = "overlay" | "preview" | "admin" | "unknown";
+type RealtimeClientKind = "overlay" | "preview" | "stage" | "admin" | "unknown";
 
 interface SlotHealth {
   ok?: boolean;
@@ -36,6 +36,7 @@ export interface BackendSlot {
 interface ConnectionCounts {
   overlay: number;
   preview: number;
+  stage: number;
   admin: number;
   unknown: number;
   total: number;
@@ -488,7 +489,7 @@ function summarizeSlot(slot: BackendSlot): SlotSummary {
 }
 
 function countConnections(sockets: Map<net.Socket, RealtimeClientKind> | undefined): ConnectionCounts {
-  const counts: ConnectionCounts = { overlay: 0, preview: 0, admin: 0, unknown: 0, total: 0 };
+  const counts: ConnectionCounts = { overlay: 0, preview: 0, stage: 0, admin: 0, unknown: 0, total: 0 };
   if (!sockets) return counts;
   for (const kind of sockets.values()) {
     counts[kind] += 1;
@@ -504,6 +505,7 @@ function classifyRealtimeClient(req: IncomingMessage): RealtimeClientKind {
     const client = url.searchParams.get("client");
     if (role === "overlay" && client === "overlay") return "overlay";
     if (role === "overlay" && client === "preview") return "preview";
+    if (role === "stage") return "stage";
     if (role === "admin") return "admin";
   } catch {
     // Invalid URLs are classified as unknown and still counted.

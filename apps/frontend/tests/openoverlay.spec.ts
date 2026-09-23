@@ -1,26 +1,11 @@
-import { expect, request as playwrightRequest, test, type BrowserContext, type Page } from "@playwright/test";
+import { expect, test, type BrowserContext, type Page } from "@playwright/test";
+import { serviceAccount } from "./serviceAccount";
 
-const backendPort = Number(process.env.OPENOVERLAY_E2E_BACKEND_PORT) || 8734;
+const backendPort = Number(process.env.OPENOVERLAY_E2E_BACKEND_PORT) || 18734;
 const backendUrl = process.env.OPENOVERLAY_E2E_BACKEND_URL || `http://127.0.0.1:${backendPort}`;
 const browserErrors = new WeakMap<BrowserContext, string[]>();
+const sharedAccount = serviceAccount("openoverlay");
 let accountSequence = 0;
-const sharedAccount = {
-  email: `e2e-shared-${Date.now()}-${process.pid}@openoverlay.local`,
-  password: "password123"
-};
-
-test.beforeAll(async () => {
-  const api = await playwrightRequest.newContext({ baseURL: backendUrl });
-  try {
-    const response = await api.post("/api/v1/auth/signup", {
-      data: sharedAccount,
-      headers: { "X-OpenOverlay-Api-Version": "v1" }
-    });
-    expect(response.status()).toBe(201);
-  } finally {
-    await api.dispose();
-  }
-});
 
 test.beforeEach(async ({ context }) => {
   const errors: string[] = [];
@@ -65,7 +50,7 @@ async function signUp(page: Page, label: string): Promise<{ email: string; passw
   await page.getByLabel("Email").fill(account.email);
   await page.getByLabel("Password").fill(account.password);
   await page.getByRole("button", { name: "Sign up" }).click();
-  await expect(page.getByRole("heading", { name: "Games" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Productions" })).toBeVisible();
   return account;
 }
 
@@ -74,16 +59,16 @@ async function signIn(page: Page): Promise<void> {
   await page.getByLabel("Email").fill(sharedAccount.email);
   await page.getByLabel("Password").fill(sharedAccount.password);
   await page.getByRole("button", { name: "Login" }).click();
-  await expect(page.getByRole("heading", { name: "Games" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Productions" })).toBeVisible();
 }
 
 async function createGame(page: Page, name: string, type: "soccer" | "church" = "soccer"): Promise<string> {
   await page.goto("/dash");
-  await expect(page.getByRole("heading", { name: "Games" })).toBeVisible();
-  await page.getByRole("button", { name: /New game/i }).click();
-  if (type !== "soccer") await page.getByLabel("Game type").selectOption(type);
-  await page.getByLabel("Game name").fill(name);
-  await page.getByRole("button", { name: "Create game" }).click();
+  await expect(page.getByRole("heading", { name: "Productions" })).toBeVisible();
+  await page.getByRole("button", { name: /New production/i }).click();
+  if (type !== "soccer") await page.getByLabel("Production type").selectOption(type);
+  await page.getByLabel("Production name").fill(name);
+  await page.getByRole("button", { name: "Create production" }).click();
   await expect(page.locator("main h1")).toHaveText(name);
   const match = new URL(page.url()).pathname.match(/^\/dash\/presets\/([^/]+)$/);
   expect(match, `expected the ${name} editor URL to include a preset id`).toBeTruthy();
@@ -153,14 +138,14 @@ test("protected routes redirect to login and return to the requested URL", async
 
 test("new-game dialog traps keyboard focus, closes with Escape, and restores focus", async ({ page }) => {
   await signIn(page);
-  const opener = page.getByRole("button", { name: /New game/i });
+  const opener = page.getByRole("button", { name: /New production/i });
   await opener.click();
 
-  const dialog = page.getByRole("dialog", { name: "New game" });
-  const gameType = page.getByLabel("Game type");
-  const gameName = page.getByLabel("Game name");
+  const dialog = page.getByRole("dialog", { name: "New production" });
+  const gameType = page.getByLabel("Production type");
+  const gameName = page.getByLabel("Production name");
   const cancel = page.getByRole("button", { name: "Cancel" });
-  const submit = page.getByRole("button", { name: "Create game" });
+  const submit = page.getByRole("button", { name: "Create production" });
   await expect(dialog).toBeVisible();
   await expect(gameName).toBeFocused();
   await gameName.fill("");
@@ -292,12 +277,8 @@ test("a failed autosave stays dirty and blocks actions until a successful retry"
     const pathname = new URL(route.request().url()).pathname;
     if (method === "PATCH" && pathname.endsWith(`/presets/${presetId}`)) {
       patchAttempts += 1;
-      if (patchAttempts === 1) {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: "{}"
-        });
+      if (patchAttempts <= 2) {
+        await route.abort("connectionreset");
         return;
       }
     }
@@ -309,7 +290,7 @@ test("a failed autosave stays dirty and blocks actions until a successful retry"
 
   await page.getByLabel("Period", { exact: true }).fill("RECOVERED");
   await expect(page.getByRole("button", { name: "Retry save" })).toBeVisible();
-  expect(patchAttempts).toBe(1);
+  expect(patchAttempts).toBe(2);
 
   await page.getByRole("button", { name: "Add point to HOME" }).click();
   await expect(page.getByRole("alert")).toContainText("Unsaved game changes must be saved");
@@ -321,7 +302,7 @@ test("a failed autosave stays dirty and blocks actions until a successful retry"
     navigationWarning = dialog.message();
     await dialog.dismiss();
   });
-  await page.getByRole("link", { name: "Games", exact: true }).click();
+  await page.getByRole("link", { name: "Productions", exact: true }).click();
   await expect.poll(() => navigationWarning).toContain("unsaved or staged changes");
   await expect(page).toHaveURL(new RegExp(`/dash/presets/${presetId}$`));
 
@@ -379,8 +360,8 @@ test("failed and delayed sidebar duplication cannot bypass or hijack dirty navig
     const pathname = new URL(route.request().url()).pathname;
     if (method === "PATCH" && pathname.endsWith(`/presets/${presetId}`)) {
       patchAttempts += 1;
-      if (patchAttempts === 1) {
-        await route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
+      if (patchAttempts <= 2) {
+        await route.abort("connectionreset");
         return;
       }
     }
@@ -423,7 +404,7 @@ test("failed and delayed sidebar duplication cannot bypass or hijack dirty navig
     afterFailureWarning = dialog.message();
     await dialog.dismiss();
   });
-  await page.getByRole("link", { name: "Games", exact: true }).click();
+  await page.getByRole("link", { name: "Productions", exact: true }).click();
   await expect.poll(() => afterFailureWarning).toContain("unsaved or staged changes");
   await expect(page).toHaveURL(new RegExp(`/dash/presets/${presetId}$`));
 
@@ -441,7 +422,7 @@ test("failed and delayed sidebar duplication cannot bypass or hijack dirty navig
     navigationWarning = dialog.message();
     await dialog.accept();
   });
-  await page.getByRole("link", { name: "Games", exact: true }).click();
+  await page.getByRole("link", { name: "Productions", exact: true }).click();
   await expect.poll(() => navigationWarning).toContain("unsaved or staged changes");
   await expect(page).toHaveURL(/\/dash$/);
 
@@ -627,9 +608,9 @@ test("the preset editor renders before optional media and team libraries finish 
     });
   }
 
-  await page.getByRole("button", { name: /New game/i }).click();
-  await page.getByLabel("Game name").fill("Optional Data Latency");
-  await page.getByRole("button", { name: "Create game" }).click();
+  await page.getByRole("button", { name: /New production/i }).click();
+  await page.getByLabel("Production name").fill("Optional Data Latency");
+  await page.getByRole("button", { name: "Create production" }).click();
 
   try {
     await expect.poll(() => optionalRequests.size).toBe(2);
@@ -637,6 +618,28 @@ test("the preset editor renders before optional media and team libraries finish 
   } finally {
     releaseOptionalRequests();
   }
+});
+
+test("failed optional catalogs retry without reloading the production editor", async ({ page }) => {
+  await signIn(page);
+  const retryAllowed = { media: false, teams: false };
+  for (const endpoint of ["media", "teams"]) {
+    await page.route(new RegExp(`/api/v1/${endpoint}(?:\\?.*)?$`), async (route) => {
+      if (route.request().method() === "GET" && !retryAllowed[endpoint as keyof typeof retryAllowed]) {
+        await route.abort("failed");
+      } else await route.continue();
+    });
+  }
+  await createGame(page, "Catalog recovery");
+  await expect(page.getByRole("button", { name: "Retry media" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry teams" })).toBeVisible();
+  retryAllowed.media = true;
+  retryAllowed.teams = true;
+  await page.getByRole("button", { name: "Retry media" }).click();
+  await page.getByRole("button", { name: "Retry teams" }).click();
+  await expect(page.getByText("No saved media yet.")).toBeVisible();
+  await expect(page.getByText("No saved teams yet.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Catalog recovery" })).toBeVisible();
 });
 
 test("dashboard, teams, and soccer editor avoid horizontal clipping at responsive widths", async ({ page }) => {
@@ -647,7 +650,7 @@ test("dashboard, teams, and soccer editor avoid horizontal clipping at responsiv
     await test.step(`dashboard at ${width}px`, async () => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto("/dash");
-      await expect(page.getByRole("heading", { name: "Games" })).toBeVisible();
+      await expect(page.getByRole("heading", { name: "Productions" })).toBeVisible();
       await assertNoHorizontalClipping(page, width);
     });
   }
@@ -701,8 +704,8 @@ test("deleting a live preset clears connected editor and overlay clients", async
   });
   expect(deleteResponse.status()).toBe(200);
 
-  await expect(page.getByRole("heading", { name: "Game deleted" })).toBeVisible();
-  await expect(page.getByRole("link", { name: "Return to games" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Production deleted" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Return to productions" })).toBeVisible();
   await expect(overlayPage.getByRole("alert")).toHaveText("This overlay was deleted and is no longer available.");
   await expect(overlayPage.locator(".overlay-viewport")).toHaveCount(0);
   await overlayPage.close();
@@ -711,9 +714,9 @@ test("deleting a live preset clears connected editor and overlay clients", async
 test("soccer and church workflows render in dashboard and overlay", async ({ page, context }) => {
   await signUp(page, "happy-path");
 
-  await page.getByRole("button", { name: /New game/i }).click();
-  await page.getByLabel("Game name").fill("E2E Soccer");
-  await page.getByRole("button", { name: "Create game" }).click();
+  await page.getByRole("button", { name: /New production/i }).click();
+  await page.getByLabel("Production name").fill("E2E Soccer");
+  await page.getByRole("button", { name: "Create production" }).click();
   await expect(page.getByRole("heading", { name: "E2E Soccer" })).toBeVisible();
   await expect(page.getByText(/\d+ outputs?/)).toBeVisible();
 
@@ -722,7 +725,7 @@ test("soccer and church workflows render in dashboard and overlay", async ({ pag
   await page.getByLabel("Upload media files").setInputFiles({ name: "logo.svg", mimeType: "image/svg+xml", buffer: Buffer.from(svg) });
   await expect(page.getByText("logo.svg")).toBeVisible();
 
-  await page.getByRole("link", { name: "Games" }).click();
+  await page.getByRole("link", { name: "Productions" }).click();
   await page.getByRole("link", { name: "Open E2E Soccer" }).click();
   await page.getByRole("button", { name: "Match", exact: true }).click();
   await page
@@ -767,11 +770,11 @@ test("soccer and church workflows render in dashboard and overlay", async ({ pag
   await expect(soccerPackage.getByText("Home Academy")).toBeVisible();
   await overlayPage.close();
 
-  await page.getByRole("link", { name: "Games" }).click();
-  await page.getByRole("button", { name: /New game/i }).click();
-  await page.getByLabel("Game type").selectOption("church");
-  await page.getByLabel("Game name").fill("E2E Church");
-  await page.getByRole("button", { name: "Create game" }).click();
+  await page.getByRole("link", { name: "Productions" }).click();
+  await page.getByRole("button", { name: /New production/i }).click();
+  await page.getByLabel("Production type").selectOption("church");
+  await page.getByLabel("Production name").fill("E2E Church");
+  await page.getByRole("button", { name: "Create production" }).click();
   await expect(page.getByRole("heading", { name: "E2E Church" })).toBeVisible();
   await page.getByRole("button", { name: "Service", exact: true }).click();
   await page.getByRole("button", { name: "Text", exact: true }).click();
@@ -779,6 +782,37 @@ test("soccer and church workflows render in dashboard and overlay", async ({ pag
   await expect(page.frameLocator('iframe[title="Church live output"]').getByText("E2E Service")).toHaveCount(0);
   await page.getByRole("button", { name: "Show slide", exact: true }).click();
   await expect(page.frameLocator('iframe[title="Church live output"]').getByText("E2E Service")).toBeVisible();
+});
+
+test("an older media item remains selectable after the first library page", async ({ page }) => {
+  test.setTimeout(90_000);
+  await signIn(page);
+  const presetId = await createGame(page, "Older media selection");
+  const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#123456"/></svg>');
+  let oldestId = "";
+  for (let index = 0; index < 26; index += 1) {
+    const response = await page.request.post(`${backendUrl}/api/v1/media`, {
+      multipart: { file: { name: index === 0 ? "oldest-logo.svg" : `newer-${index}.svg`, mimeType: "image/svg+xml", buffer: svg } }
+    });
+    expect(response.status()).toBe(201);
+    if (index === 0) oldestId = (await response.json()).media.id;
+  }
+  await page.getByRole("button", { name: "Match", exact: true }).click();
+  await page
+    .locator("summary")
+    .filter({ hasText: /^Home team details/ })
+    .click();
+  await page
+    .getByRole("button", { name: /Choose existing logo from media library/ })
+    .first()
+    .click();
+  await page.getByRole("button", { name: "Load more" }).click();
+  const save = page.waitForResponse((response) => response.request().method() === "PATCH" && response.url().endsWith(`/api/v1/presets/${presetId}`));
+  await page.getByRole("button", { name: "oldest-logo.svg" }).click();
+  const saved = await save;
+  expect(saved.status()).toBe(200);
+  const detail = await page.request.get(`${backendUrl}/api/v1/presets/${presetId}`);
+  expect((await detail.json()).preset.state.home.logoMediaId).toBe(oldestId);
 });
 
 test("live output survives concurrent scores, capture clock skew, reconnect, and 16:9 resizing", async ({ page, browser }, testInfo) => {
@@ -871,7 +905,7 @@ test("overlay falls back to HTTP polling when WebSocket transport is blocked", a
 
 test("teams, media deletion, sharing, church output, and accessible controls work end to end", async ({ page, browser }, testInfo) => {
   const { default: AxeBuilder } = await import("@axe-core/playwright");
-  await signUp(page, "library-owner");
+  await signIn(page);
   const checkAccessibility = async () => {
     // Navigation fades briefly composite readable text against the page background.
     // Audit the settled surface while retaining every contrast assertion.
@@ -889,8 +923,11 @@ test("teams, media deletion, sharing, church output, and accessible controls wor
   await page.getByRole("button", { name: "New Team" }).click();
   await page.getByRole("dialog").getByLabel("Team name").fill("Audit United");
   await page.getByRole("button", { name: "Create team" }).click();
+  await expect(page.getByRole("heading", { name: "Audit United" })).toBeVisible();
+  const teamSave = page.waitForResponse((response) => response.request().method() === "PATCH" && new URL(response.url()).pathname.startsWith("/api/v1/teams/"));
   await page.getByLabel("Abbreviation", { exact: true }).fill("AUC");
-  await expect(page.locator(".autosave-status")).toContainText("Saved");
+  expect((await teamSave).status()).toBe(200);
+  await expect(page.locator(".autosave-status")).toContainText(/Saved|Updated/);
   await page.reload();
   await expect(page.getByLabel("Abbreviation", { exact: true })).toHaveValue("AUC");
   await checkAccessibility();
@@ -907,7 +944,7 @@ test("teams, media deletion, sharing, church output, and accessible controls wor
   await expect(page.getByText("audit.svg")).toBeVisible();
   await checkAccessibility();
   page.once("dialog", (dialog) => dialog.accept());
-  await page.getByRole("button", { name: /Delete/ }).click();
+  await page.getByRole("article").filter({ hasText: "audit.svg" }).getByRole("button", { name: "Delete" }).click();
   await expect(page.getByText("audit.svg")).toBeHidden();
 
   await createGame(page, "Shared Service", "church");
@@ -977,7 +1014,7 @@ test("a lost action response preserves the committed score and the next action",
     { times: 1 }
   );
   await page.getByRole("button", { name: "Add point to HOME" }).click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.locator(".score-control strong").first()).toHaveText("1");
   await page.getByRole("button", { name: "Add point to HOME" }).click();
   await expect(score).toHaveText("2");
@@ -1289,7 +1326,7 @@ test("church drafts, reordering, and deletion never change a published slide", a
   await expect(output.getByText("Next song", { exact: true })).toBeVisible();
   if (!(await page.getByRole("button", { name: "Delete slide", exact: true }).isVisible())) await page.locator(".church-slide-editor > summary").click();
   await expect(page.getByRole("button", { name: "Delete slide", exact: true })).toBeDisabled();
-  await page.getByRole("button", { name: "Preview Slide 1", exact: true }).click();
+  await page.getByRole("button", { name: /^Preview Slide 1, slide/ }).click();
   await page.getByRole("button", { name: "Delete slide", exact: true }).click();
   await expect(page.getByRole("status").filter({ hasText: "Saved" })).toContainText("Saved");
   await page.reload();

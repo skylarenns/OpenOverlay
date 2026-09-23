@@ -12,6 +12,7 @@ import type { AppConfig } from "../config.js";
 import { closeBackendServer } from "../lifecycle.js";
 import { attachRealtime, type RealtimeHub } from "../realtime.js";
 import { signup } from "./helpers.js";
+import { createDefaultChurchState } from "@openoverlay/shared";
 
 interface RealtimeTestServer {
   app: BackendApp;
@@ -30,6 +31,54 @@ afterEach(async () => {
 });
 
 describe("realtime overlay clients", () => {
+  it("separates public and stage payloads and disconnects a rotated stage", async () => {
+    const testServer = await makeRealtimeTestServer();
+    const agent = request.agent(testServer.app.app);
+    await signup(agent, "stage-socket@example.com");
+    const state = createDefaultChurchState("Service");
+    state.slides[0].notes = "Stage secret";
+    state.stageMessage = "Operator cue";
+    state.elements.fullscreenSlide.visible = true;
+    const created = await agent.post("/api/presets").send({ name: "Service", type: "church", state }).expect(201);
+    const id = created.body.preset.id as string;
+    const publicId = created.body.preset.publicId as string;
+    const key = (await agent.get(`/api/presets/${id}/stage`).expect(200)).body.stageKey as string;
+
+    const audience = connectOverlay(testServer.url, publicId, "overlay", undefined, false);
+    const audienceReady = waitForSocketPayload<{ state: unknown }>(audience, "state:update");
+    audience.connect();
+    expect(JSON.stringify(await audienceReady)).not.toMatch(/Stage secret|Operator cue/);
+
+    const stage = connectSocket(testServer.url, {
+      transports: ["websocket"],
+      reconnection: false,
+      autoConnect: false,
+      query: { role: "stage", overlayId: publicId },
+      auth: { role: "stage", overlayId: publicId, stageKey: key }
+    });
+    sockets.push(stage);
+    const stageReady = waitForSocketPayload<{ state: unknown }>(stage, "state:update");
+    stage.connect();
+    expect(JSON.stringify(await stageReady)).toMatch(/Stage secret|Operator cue/);
+    expect(testServer.hub.getOverlayClientCount(publicId)).toBe(2);
+    const disconnected = waitForSocket(stage, "disconnect");
+    await agent.post(`/api/presets/${id}/stage/rotate`).expect(200);
+    await disconnected;
+    await waitForOverlayClientCount(testServer.hub, publicId, 1);
+    expect(audience.connected).toBe(true);
+
+    const stale = connectSocket(testServer.url, {
+      transports: ["websocket"],
+      reconnection: false,
+      autoConnect: false,
+      query: { role: "stage", overlayId: publicId },
+      auth: { role: "stage", overlayId: publicId, stageKey: key }
+    });
+    sockets.push(stale);
+    const rejected = waitForSocketPayload<{ error: string }>(stale, "error:message");
+    stale.connect();
+    await expect(rejected).resolves.toEqual({ error: "Stage not found" });
+  });
   it("does not count preview clients as overlay clients", async () => {
     const testServer = await makeRealtimeTestServer();
     const agent = request.agent(testServer.app.app);

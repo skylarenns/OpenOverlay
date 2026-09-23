@@ -65,9 +65,19 @@ export function OverlayRenderer({ type, state, serverTimeMs, transparent = true,
   const soccerNeedsClockTick =
     type === "soccer" &&
     isSoccerState(state) &&
+    state.elements.fullscreen.visible &&
+    state.soccerPackage.activeOverlay !== null &&
     ((state.clock.running && !clockIsAtStop(state.clock, now)) ||
       (state.soccerPackage.countdown.running && packageCountdownSeconds(state.soccerPackage.countdown, now) > 0));
-  const needsClockTick = state.activeGraphics.some((graphic) => graphic.expiresAtMs !== null && graphic.expiresAtMs > now) || soccerNeedsClockTick;
+  const visibleTimedGraphic = state.activeGraphics.some((graphic) => {
+    if (graphic.expiresAtMs === null || graphic.expiresAtMs <= now) return false;
+    if (type !== "church" || !isChurchState(state)) return true;
+    if (state.blackout) return false;
+    if (graphic.kind === "countdown") return state.elements.countdown.visible;
+    if (graphic.kind === "church-lower-third" || graphic.kind === "lower-third") return state.elements.lowerThird.visible;
+    return true;
+  });
+  const needsClockTick = visibleTimedGraphic || soccerNeedsClockTick;
 
   useEffect(() => {
     if (!needsClockTick) return;
@@ -151,10 +161,11 @@ function SoccerOverlay({
   const packageColors = soccer.colorBanks[soccer.overlayPackage];
 
   const scheduleTransitionStep = useCallback((callback: () => void, delay: number) => {
+    const duration = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ? 0 : delay;
     const timeout = window.setTimeout(() => {
       transitionTimeoutsRef.current = transitionTimeoutsRef.current.filter((item) => item !== timeout);
       callback();
-    }, delay);
+    }, duration);
     transitionTimeoutsRef.current.push(timeout);
   }, []);
 
@@ -299,8 +310,12 @@ function SoccerOverlay({
     const animation = soccer.textAnimation;
     if (!animation || animation.id === previousTextAnimationIdRef.current) return;
     previousTextAnimationIdRef.current = animation.id;
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+      setActiveTextAnimation(null);
+      return;
+    }
     setActiveTextAnimation(animation);
-    const timeout = window.setTimeout(() => setActiveTextAnimation((current) => (current?.id === animation.id ? null : current)), 520);
+    const timeout = window.setTimeout(() => setActiveTextAnimation((current) => (current?.id === animation.id ? null : current)), 760);
     return () => window.clearTimeout(timeout);
   }, [soccer.textAnimation]);
 

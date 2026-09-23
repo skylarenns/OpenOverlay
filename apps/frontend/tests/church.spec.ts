@@ -1,15 +1,15 @@
 import { expect, test, type Page } from "@playwright/test";
 import AxeBuilder from "@axe-core/playwright";
-import { ensureServiceAccount, serviceAccount } from "./serviceAccount";
+import { serviceAccount } from "./serviceAccount";
 
-const backend = process.env.OPENOVERLAY_E2E_BACKEND_URL || `http://127.0.0.1:${Number(process.env.OPENOVERLAY_E2E_BACKEND_PORT) || 8734}`;
+const backend = process.env.OPENOVERLAY_E2E_BACKEND_URL || `http://127.0.0.1:${Number(process.env.OPENOVERLAY_E2E_BACKEND_PORT) || 18734}`;
 const headers = { "X-OpenOverlay-Api-Version": "v1" };
+const churchAccount = serviceAccount("church");
 
 async function createService(page: Page) {
-  await ensureServiceAccount();
   const login = await page.request.post(`${backend}/api/v1/auth/login`, {
     headers,
-    data: serviceAccount
+    data: churchAccount
   });
   expect(login.status()).toBe(200);
   const response = await page.request.post(`${backend}/api/v1/presets`, { headers, data: { name: "Sunday morning", type: "church" } });
@@ -19,6 +19,55 @@ async function createService(page: Page) {
   await expect(page.getByRole("heading", { name: "Sunday morning", exact: true })).toBeVisible();
   return preset;
 }
+
+test("tablet and phone church layouts put monitors before preparation fields", async ({ page }) => {
+  await createService(page);
+  for (const width of [900, 390]) {
+    await page.setViewportSize({ width, height: 844 });
+    if (width === 390) await page.reload();
+    const monitors = await page.locator(".church-monitors").boundingBox();
+    const rundown = await page.locator(".church-rundown").boundingBox();
+    const workbench = await page.locator(".church-slide-workbench").boundingBox();
+    expect(monitors && rundown && workbench).toBeTruthy();
+    expect(monitors!.y).toBeLessThan(rundown!.y);
+    expect(monitors!.y).toBeLessThan(workbench!.y);
+    await expect(page.getByRole("button", { name: "Show slide", exact: true })).toBeVisible();
+    if (width === 390) await expect(page.locator(".church-slide-editor")).not.toHaveAttribute("open");
+  }
+});
+
+test("a direct public output page loads without the operator module", async ({ page, context }) => {
+  const preset = await createService(page);
+  const output = await context.newPage();
+  const modules: string[] = [];
+  output.on("request", (request) => modules.push(new URL(request.url()).pathname));
+  await output.goto(`/overlay/${preset.publicId}?display=projector`);
+  await expect(output.getByRole("main", { name: "Projector output" })).toBeVisible();
+  expect(modules.some((name) => name.endsWith("/src/App.tsx"))).toBe(false);
+  await output.close();
+});
+
+test("stage controls explain when an older backend lacks the stage feature", async ({ page }) => {
+  let stageRequests = 0;
+  await page.route("**/api/v1/presets/*/stage", async (route) => {
+    stageRequests += 1;
+    await route.continue();
+  });
+  await page.route("**/health", async (route) => {
+    const response = await route.fetch();
+    const health = (await response.json()) as { compatibility?: { features?: Record<string, unknown> } };
+    await route.fulfill({
+      response,
+      json: {
+        ...health,
+        compatibility: { ...health.compatibility, features: { ...health.compatibility?.features, stage: false } }
+      }
+    });
+  });
+  await createService(page);
+  await expect(page.getByText("Stage display requires a backend with stage access support.")).toBeVisible();
+  expect(stageRequests).toBe(0);
+});
 
 test("prepare and run a full Sunday service with independent projector and stage screens", async ({ page, context }, info) => {
   test.setTimeout(100_000);
@@ -50,11 +99,13 @@ test("prepare and run a full Sunday service with independent projector and stage
   const projector = await context.newPage();
   await projector.goto(`/overlay/${preset.publicId}?display=projector`);
   const stage = await context.newPage();
-  await stage.goto(`/overlay/${preset.publicId}?display=stage`);
+  const stageCapability = await page.request.get(`${backend}/api/v1/presets/${preset.id}/stage`, { headers });
+  expect(stageCapability.status()).toBe(200);
+  await stage.goto(`/overlay/${preset.publicId}?display=stage#${(await stageCapability.json()).stageKey}`);
   await expect(stage.getByRole("region", { name: "Current slide" })).toContainText("Morning light");
   await expect(stage.getByRole("region", { name: "Next slide" })).toContainText("Sing together");
   await expect(projector.getByText("Morning light\nWe gather here", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Preview Opening song · 2", exact: true }).click();
+  await page.getByRole("button", { name: /^Preview Opening song · 2, slide/ }).click();
   await expect(projector.getByText("Morning light\nWe gather here", { exact: true })).toBeVisible();
   if (!(await page.locator(".church-slide-editor").getAttribute("open")) && !(await page.getByLabel("Stage notes", { exact: true }).isVisible()))
     await page.locator(".church-slide-editor > summary").click();
@@ -97,6 +148,7 @@ test("prepare and run a full Sunday service with independent projector and stage
   if (!(await page.getByLabel("Upload slide image").isVisible())) {
     if (!(await page.getByRole("textbox", { name: "Text", exact: true }).isVisible())) await page.locator(".church-slide-editor > summary").click();
   }
+  await expect(page.getByLabel("Upload slide image")).toBeEnabled();
   await page.getByLabel("Upload slide image").setInputFiles({
     name: "service-background.svg",
     mimeType: "image/svg+xml",

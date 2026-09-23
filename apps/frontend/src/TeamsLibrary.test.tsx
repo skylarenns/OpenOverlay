@@ -158,6 +158,20 @@ describe("TeamsLibrary concurrency and reconciliation", () => {
     await act(async () => media.resolve({ media: [] }));
   });
 
+  it("retries failed saved logos without reloading or discarding a team draft", async () => {
+    apiMocks.listTeams.mockResolvedValue({ teams: [makeTeam({ fullName: "Ready Team" })] });
+    apiMocks.listMedia.mockRejectedValueOnce(new Error("media unavailable")).mockResolvedValueOnce({ media: [] });
+    renderTeamsLibrary();
+    const name = await screen.findByRole("textbox", { name: "Team name" });
+    fireEvent.change(name, { target: { value: "Local edit" } });
+    const retry = await screen.findByRole("button", { name: "Retry logos" });
+    fireEvent.click(retry);
+    await waitFor(() => expect(screen.getByText("No saved logos yet.")).toBeVisible());
+    expect(screen.getByRole("textbox", { name: "Team name" })).toHaveValue("Local edit");
+    expect(apiMocks.listTeams).toHaveBeenCalledOnce();
+    expect(apiMocks.listMedia).toHaveBeenCalledTimes(2);
+  });
+
   it("preserves a newly selected team when an earlier deletion finishes", async () => {
     const removal = deferred<{ ok: boolean }>();
     apiMocks.listTeams.mockResolvedValue({
@@ -175,7 +189,7 @@ describe("TeamsLibrary concurrency and reconciliation", () => {
     expect(screen.getByDisplayValue("Charlie")).toBeVisible();
   });
 
-  it("replaces a conflicted draft with the latest server copy before allowing another edit", async () => {
+  it("keeps a conflicted draft until explicit discard, then loads the latest server copy", async () => {
     const initial = makeTeam({ fullName: "Original team" });
     const remote = makeTeam({ fullName: "Remote team", coach: "Remote coach", revision: 2 });
     const firstPatch = deferred<{ team: TeamLibraryEntry }>();
@@ -193,8 +207,11 @@ describe("TeamsLibrary concurrency and reconciliation", () => {
     });
     await screen.findByText(/changed in another tab/i, {}, { timeout: 2_000 });
 
+    expect(screen.getByRole("textbox", { name: "Team name" })).toHaveValue("Local stale team");
+
     apiMocks.listTeams.mockResolvedValueOnce({ teams: [remote] });
-    fireEvent.click(screen.getByRole("button", { name: "Reload teams" }));
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    fireEvent.click(screen.getByRole("button", { name: "Discard edits and reload" }));
 
     await waitFor(() => {
       expect(screen.getByRole("textbox", { name: "Team name" })).toHaveValue("Remote team");

@@ -217,7 +217,7 @@ describe("TeamFields", () => {
   it("gives the existing-media logo selector an accessible name", () => {
     render(<TeamFields team={defaultTeam("home")} media={[mediaFixture()]} onChange={vi.fn()} />);
 
-    expect(screen.getByRole("combobox", { name: "Choose existing logo from media library" })).toBeVisible();
+    expect(screen.getByRole("button", { name: /Choose existing logo from media library/ })).toBeVisible();
   });
 });
 

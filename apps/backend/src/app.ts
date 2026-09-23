@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import cookieParser from "cookie-parser";
 import cors from "cors";
@@ -56,11 +56,13 @@ import {
   isPresetAction,
   isSoccerState,
   materializeState,
+  publicOverlayState,
   mergePresetState,
   readStoredPresetState,
   validatePresetActionPayload
 } from "./state.js";
 import type { AppContext } from "./types.js";
+import { validStageKey } from "./stage.js";
 
 export interface BackendApp {
   app: express.Express;
@@ -110,6 +112,16 @@ class MediaReferencedError extends Error {}
 class MediaQuotaError extends Error {}
 class StorageCapacityError extends Error {}
 class ResourceQuotaError extends Error {}
+class SessionExpiredError extends Error {}
+class IdempotencyConflictError extends Error {}
+
+interface MutationReceiptRequest {
+  ownerUserId: string;
+  resourceId: string;
+  operation: string;
+  key: string;
+  requestHash: string;
+}
 
 export function createBackendApp(configOverrides: Partial<AppConfig> = {}): BackendApp {
   const config = loadConfig(configOverrides);
@@ -277,6 +289,26 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ user: serializeUser(req.user!) });
   });
 
+  api.get("/operations/backup", requireAuth, (_req, res) => {
+    const statusFile = path.join(path.dirname(ctx.config.databasePath), "backup-status.json");
+    let recorded: Record<string, unknown> = {};
+    try {
+      recorded = JSON.parse(fs.readFileSync(statusFile, "utf8")) as Record<string, unknown>;
+    } catch {
+      // Missing or unreadable status is an overdue backup, not a healthy one.
+    }
+    const lastSuccessAt = typeof recorded.lastSuccessAt === "string" && Number.isFinite(Date.parse(recorded.lastSuccessAt)) ? recorded.lastSuccessAt : null;
+    const lastFailureAt = typeof recorded.lastFailureAt === "string" && Number.isFinite(Date.parse(recorded.lastFailureAt)) ? recorded.lastFailureAt : null;
+    res.json({
+      backup: {
+        lastSuccessAt,
+        lastFailureAt,
+        overdue: !lastSuccessAt || Date.now() - Date.parse(lastSuccessAt) > 36 * 60 * 60_000,
+        failedSinceSuccess: Boolean(lastFailureAt && recorded.lastError)
+      }
+    });
+  });
+
   api.use((req, _res, next) => {
     if (!["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
       next();
@@ -296,7 +328,9 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
 
   api.post("/teams", requireAuth, (req, res) => {
     assertTeamQuota(ctx, req.user!.id);
-    const team = canonicalizeOwnedTeamMedia(ctx, req.user!.id, sanitizeTeamInput(requestBody(req)));
+    const body = requestBody(req);
+    assertTeamInputTypes(body);
+    const team = canonicalizeOwnedTeamMedia(ctx, req.user!.id, sanitizeTeamInput(body));
     const row = db.createTeam({ ownerUserId: req.user!.id, team });
     res.status(201).json({ team: serializeTeam(row) });
   });
@@ -309,6 +343,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     }
     const current = serializeTeam(existing);
     const body = requestBody(req);
+    assertTeamInputTypes(body);
     const expectedRevision = requiredExpectedRevisionFromRequest(req, body);
     const team = {
       ...canonicalizeOwnedTeamMedia(ctx, req.user!.id, sanitizeTeamInput(body, current)),
@@ -376,6 +411,28 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ preset: serializePreset(row, ctx) });
   });
 
+  api.get("/presets/:id/stage", requireAuth, (req, res) => {
+    const row = db.getPresetForUser(routeParam(req, "id"), req.user!.id);
+    if (!row) return void res.status(404).json({ error: "Preset not found" });
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ stageKey: row.stage_key, publicId: row.public_id });
+  });
+
+  api.post("/presets/:id/stage/rotate", requireAuth, (req, res) => {
+    const row = db.setStageKey(routeParam(req, "id"), req.user!.id, true);
+    if (!row) return void res.status(404).json({ error: "Preset not found" });
+    ctx.realtime?.disconnectStage(row.public_id);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ stageKey: row.stage_key, publicId: row.public_id });
+  });
+
+  api.delete("/presets/:id/stage", requireAuth, (req, res) => {
+    const row = db.setStageKey(routeParam(req, "id"), req.user!.id, false);
+    if (!row) return void res.status(404).json({ error: "Preset not found" });
+    ctx.realtime?.disconnectStage(row.public_id);
+    res.json({ ok: true });
+  });
+
   api.patch("/presets/:id", requireAuth, (req, res) => {
     const row = db.getPresetForUser(routeParam(req, "id"), req.user!.id);
     if (!row) {
@@ -383,6 +440,13 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
       return;
     }
     const body = requestBody(req);
+    const receiptRequest = mutationReceiptRequest(req, row, "preset.patch", body);
+    const priorReceipt = receiptRequest && db.getMutationReceipt(row.owner_user_id, row.id, receiptRequest.operation, receiptRequest.key);
+    if (priorReceipt) {
+      assertReceiptMatches(priorReceipt.request_hash, receiptRequest!.requestHash);
+      res.json({ preset: serializePreset(db.getPresetForUser(row.id, row.owner_user_id)!, ctx), appliedRevision: priorReceipt.applied_revision });
+      return;
+    }
     const expectedRevision = requiredExpectedRevisionFromRequest(req, body);
     const existingState = materializeState(readStoredPresetState(row).state);
     const candidateState = Object.hasOwn(body, "state")
@@ -392,17 +456,23 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
         : existingState;
     const nextState = canonicalizeOwnedPresetMedia(ctx, req.user!.id, candidateState);
     const name = typeof body.name === "string" && body.name.trim() ? body.name.trim().slice(0, 120) : undefined;
-    const updated = db.transaction(() => {
+    const result = db.transaction(() => {
+      const concurrentReceipt = receiptRequest && db.getMutationReceipt(row.owner_user_id, row.id, receiptRequest.operation, receiptRequest.key);
+      if (concurrentReceipt) {
+        assertReceiptMatches(concurrentReceipt.request_hash, receiptRequest!.requestHash);
+        return { updated: db.getPresetForUser(row.id, row.owner_user_id), appliedRevision: concurrentReceipt.applied_revision, replay: true };
+      }
       const changed = db.updatePreset({ id: row.id, ownerUserId: req.user!.id, name, state: nextState, expectedRevision });
       if (changed) db.logEvent({ presetId: row.id, ownerUserId: req.user!.id, type: "preset.update", payload: { nameChanged: Boolean(name) } });
-      return changed;
+      if (changed && receiptRequest) storeMutationReceipt(db, receiptRequest, changed.revision);
+      return { updated: changed, appliedRevision: changed?.revision, replay: false };
     });
-    if (!updated) {
+    if (!result.updated) {
       res.status(404).json({ error: "Preset not found" });
       return;
     }
-    ctx.realtime?.broadcastPreset(updated);
-    res.json({ preset: serializePreset(updated, ctx) });
+    if (!result.replay) ctx.realtime?.broadcastPreset(result.updated);
+    res.json({ preset: serializePreset(result.updated, ctx), ...(receiptRequest ? { appliedRevision: result.appliedRevision } : {}) });
   });
 
   api.delete("/presets/:id", requireAuth, (req, res) => {
@@ -537,6 +607,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
       return;
     }
     const recipient = db.findUserByEmail(recipientEmail);
+    if (body.side !== undefined && body.side !== "home" && body.side !== "away") throw new RequestValidationError("Invalid team side");
     reserveDurableShare(ctx, req.user!.id);
     const side = body.side === "away" ? "away" : "home";
     const copiedState = createDefaultPresetState("soccer", `${state[side].shortName} Team`);
@@ -653,25 +724,38 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
         else res.status(401).json({ error: "Authentication or valid action key required" });
         return;
       }
-      authRateLimiter.reserveAction(row.id, req.ip || "unknown");
       const action = routeParam(req, "action");
       if (!isPresetAction(action)) throw new PresetActionValidationError("Unknown preset action");
-      const body = requestBody(req);
+      const body = req.body === undefined ? {} : requestBody(req);
+      const receiptRequest = mutationReceiptRequest(req, row, `action.${action}`, body);
+      const priorReceipt = receiptRequest && db.getMutationReceipt(row.owner_user_id, row.id, receiptRequest.operation, receiptRequest.key);
+      if (priorReceipt) {
+        assertReceiptMatches(priorReceipt.request_hash, receiptRequest!.requestHash);
+        res.json({ preset: serializePreset(db.getPresetForUser(row.id, row.owner_user_id)!, ctx), appliedRevision: priorReceipt.applied_revision });
+        return;
+      }
+      authRateLimiter.reserveAction(row.id, req.ip || "unknown");
       const storedState = readStoredPresetState(row).state;
       const actionPayload = validatePresetActionPayload(storedState, action, actionPayloadFields(body));
       const state = applyAction(storedState, action, actionPayload);
       const expectedRevision = expectedRevisionFromRequest(req, body) ?? row.revision;
-      const updated = db.transaction(() => {
+      const result = db.transaction(() => {
+        const concurrentReceipt = receiptRequest && db.getMutationReceipt(row.owner_user_id, row.id, receiptRequest.operation, receiptRequest.key);
+        if (concurrentReceipt) {
+          assertReceiptMatches(concurrentReceipt.request_hash, receiptRequest!.requestHash);
+          return { updated: db.getPresetForUser(row.id, row.owner_user_id), appliedRevision: concurrentReceipt.applied_revision, replay: true };
+        }
         const changed = db.updatePreset({ id: row.id, ownerUserId: row.owner_user_id, state, expectedRevision });
         if (changed) db.logEvent({ presetId: row.id, ownerUserId: row.owner_user_id, type: `action.${action}`, payload: actionPayload });
-        return changed;
+        if (changed && receiptRequest) storeMutationReceipt(db, receiptRequest, changed.revision);
+        return { updated: changed, appliedRevision: changed?.revision, replay: false };
       });
-      if (!updated) {
+      if (!result.updated) {
         res.status(404).json({ error: "Preset not found" });
         return;
       }
-      ctx.realtime?.broadcastPreset(updated);
-      res.json({ preset: serializePreset(updated, ctx) });
+      if (!result.replay) ctx.realtime?.broadcastPreset(result.updated);
+      res.json({ preset: serializePreset(result.updated, ctx), ...(receiptRequest ? { appliedRevision: result.appliedRevision } : {}) });
     })
   );
 
@@ -692,7 +776,30 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
         type: row.type,
         revision: row.revision,
         stateRecovered: stored.recovered || undefined,
-        state,
+        state: publicOverlayState(state),
+        updatedAt: row.updated_at
+      }
+    });
+  });
+
+  api.get("/stage/:publicId", (req, res) => {
+    const row = db.getPresetByPublicId(routeParam(req, "publicId"));
+    if (!row || !validStageKey(row.stage_key, req.header("X-OpenOverlay-Stage-Key"))) {
+      res.status(404).json({ error: "Stage not found" });
+      return;
+    }
+    const stored = readStoredPresetState(row);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      overlay: {
+        serverTimeMs: Date.now(),
+        id: row.id,
+        publicId: row.public_id,
+        name: row.name,
+        type: row.type,
+        revision: row.revision,
+        stateRecovered: stored.recovered || undefined,
+        state: materializeState(stored.state),
         updatedAt: row.updated_at
       }
     });
@@ -738,7 +845,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
         res.status(400).json({ error: "File is required" });
         return;
       }
-      const media = await saveMediaUpload(ctx, req.user!.id, req.file);
+      const media = await saveMediaUpload(ctx, req.user!.id, req.file, () => authenticatedUser(req, ctx)?.id === req.user!.id);
       res.status(201).json({ media: serializeMedia(media) });
     })
   );
@@ -809,6 +916,10 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
       res.status(428).json({ error: error.message });
       return;
     }
+    if (error instanceof SessionExpiredError) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
     if (error instanceof CorsOriginError) {
       res.status(403).json({ error: error.message });
       return;
@@ -820,6 +931,10 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     }
     if (error instanceof RevisionConflictError) {
       res.status(409).json({ error: error.message, currentRevision: error.currentRevision });
+      return;
+    }
+    if (error instanceof IdempotencyConflictError) {
+      res.status(409).json({ error: error.message });
       return;
     }
     if (error instanceof MediaReferencedError) {
@@ -996,6 +1111,18 @@ function sanitizeTeamInput(
     schoolName: stringField(body.schoolName, fallback.schoolName).slice(0, 120),
     record: sanitizeRecord(body.record, fallback.record)
   };
+}
+
+function assertTeamInputTypes(body: Record<string, unknown>): void {
+  for (const field of ["fullName", "name", "shortName", "abbreviation", "rosterText", "coach", "schoolName", "primaryColor", "secondaryColor"] as const) {
+    if (Object.hasOwn(body, field) && typeof body[field] !== "string") throw new RequestValidationError(`${field} must be a string`);
+  }
+  for (const field of ["logoMediaId", "logoUrl"] as const) {
+    if (Object.hasOwn(body, field) && body[field] !== null && typeof body[field] !== "string")
+      throw new RequestValidationError(`${field} must be a string or null`);
+  }
+  if (Object.hasOwn(body, "imageCrop") && !isRecord(body.imageCrop)) throw new RequestValidationError("imageCrop must be an object");
+  if (Object.hasOwn(body, "record") && !isRecord(body.record)) throw new RequestValidationError("record must be an object");
 }
 
 type PersistableTeam = Omit<TeamLibraryEntry, "id" | "revision" | "createdAt" | "updatedAt">;
@@ -1216,7 +1343,7 @@ function csrfOriginGuard(ctx: AppContext) {
   };
 }
 
-async function saveMediaUpload(ctx: AppContext, ownerUserId: string, file: Express.Multer.File): Promise<MediaRow> {
+async function saveMediaUpload(ctx: AppContext, ownerUserId: string, file: Express.Multer.File, sessionStillValid: () => boolean): Promise<MediaRow> {
   if (!allowedMimes.has(file.mimetype)) {
     throw new UploadValidationError("Unsupported image type");
   }
@@ -1268,6 +1395,7 @@ async function saveMediaUpload(ctx: AppContext, ownerUserId: string, file: Expre
       }
     }
     return ctx.db.transaction(() => {
+      if (!sessionStillValid()) throw new SessionExpiredError("Authentication required");
       const totalSize = file.size + (thumbnail?.size || 0);
       assertMediaQuota(ctx, ownerUserId, totalSize);
       // BEGIN IMMEDIATE serializes this exact global quota check with inserts
@@ -1626,6 +1754,36 @@ function actionPayloadFields(body: Record<string, unknown>): Record<string, unkn
   const payload = { ...body };
   delete payload.expectedRevision;
   return payload;
+}
+
+function mutationReceiptRequest(req: Request, row: PresetRow, operation: string, body: Record<string, unknown>): MutationReceiptRequest | null {
+  const key = req.header("Idempotency-Key");
+  if (key === undefined) return null;
+  if (!/^[A-Za-z0-9._~-]{8,128}$/.test(key)) throw new RequestValidationError("Invalid Idempotency-Key");
+  return {
+    ownerUserId: row.owner_user_id,
+    resourceId: row.id,
+    operation,
+    key,
+    requestHash: createHash("sha256")
+      .update(JSON.stringify([body, req.header("If-Match") ?? null]))
+      .digest("hex")
+  };
+}
+
+function assertReceiptMatches(expected: string, actual: string): void {
+  if (expected !== actual) throw new IdempotencyConflictError("Idempotency-Key was already used with a different request");
+}
+
+function storeMutationReceipt(db: Database, request: MutationReceiptRequest, appliedRevision: number): void {
+  db.recordMutationReceipt({
+    owner_user_id: request.ownerUserId,
+    resource_id: request.resourceId,
+    operation: request.operation,
+    idempotency_key: request.key,
+    request_hash: request.requestHash,
+    applied_revision: appliedRevision
+  });
 }
 
 function requestBody(req: Request): Record<string, unknown> {

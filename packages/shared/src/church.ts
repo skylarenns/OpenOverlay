@@ -1,5 +1,7 @@
 import { CHURCH_BACKGROUND_PRESETS, makeId, type ChurchSlide, type ChurchState } from "./index.js";
 
+export const MAX_SERVICE_FILE_BYTES = 2 * 1024 * 1024;
+
 /** Include old or imported slides whose section was never listed in sections. */
 export function churchSections(state: Pick<ChurchState, "sections" | "slides">): string[] {
   return [...new Set([...state.sections, ...state.slides.map((slide) => slide.section)])];
@@ -83,7 +85,7 @@ export function exportChurchService(state: ChurchState): string {
 }
 
 export function importChurchService(source: string): Pick<ChurchState, "sections" | "slides"> {
-  if (source.length > 512_000) throw new Error("Service files must be smaller than 512 KB.");
+  if (new TextEncoder().encode(source).byteLength > MAX_SERVICE_FILE_BYTES) throw new Error("Service files must be 2 MiB or smaller.");
   const data: unknown = JSON.parse(source);
   if (
     !data ||

@@ -63,15 +63,15 @@ jobs:
             sleep $((attempt * 10))
           done
 
+      - name: Verify systemd units
+        run: bash scripts/verify-systemd-units.sh
+
       - name: Run end-to-end tests
         env:
           OPENOVERLAY_E2E_BACKEND_PORT: 18734
           OPENOVERLAY_E2E_FRONTEND_PORT: 15174
           OPENOVERLAY_E2E_DATA_DIR: ${{ runner.temp }}/openoverlay-e2e
         run: npm run test:e2e
-
-      - name: Verify systemd units
-        run: systemd-analyze verify apps/backend/systemd/*.service apps/backend/systemd/*.timer
 
   secret-scan:
     runs-on: ubuntu-latest

@@ -388,14 +388,14 @@ describe("preset deletion realtime handling", () => {
     const socket = socketHarness.sockets[0]!;
     act(() => socket.emit("preset:deleted", deletionEvent()));
 
-    expect(await screen.findByRole("heading", { name: "Game deleted" })).toBeVisible();
-    expect(screen.getByRole("alert")).toHaveTextContent("This game was deleted in another session");
-    expect(screen.getByRole("link", { name: "Return to games" })).toHaveAttribute("href", "/dash");
+    expect(await screen.findByRole("heading", { name: "Production deleted" })).toBeVisible();
+    expect(screen.getByRole("alert")).toHaveTextContent("This production was deleted in another session");
+    expect(screen.getByRole("link", { name: "Return to productions" })).toHaveAttribute("href", "/dash");
     expect(requestSignal?.aborted).toBe(true);
     expect(socket.disconnect).toHaveBeenCalledOnce();
 
     await act(async () => pendingPreset.resolve({ preset: presetFixture() }));
-    expect(screen.getByRole("heading", { name: "Game deleted" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "Production deleted" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Realtime Game" })).not.toBeInTheDocument();
   });
 
@@ -465,7 +465,7 @@ describe("preset deletion realtime handling", () => {
     expect(socket.disconnect).not.toHaveBeenCalled();
 
     act(() => socket.emit("error:message", { error: "Preset not found" }));
-    expect(await screen.findByRole("heading", { name: "Game deleted" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "Production deleted" })).toBeVisible();
     expect(screen.queryByRole("heading", { name: "Realtime Game" })).not.toBeInTheDocument();
     expect(socket.disconnect).toHaveBeenCalledOnce();
   });

@@ -35,6 +35,25 @@ function Editor() {
 }
 
 describe("Sunday service operation", () => {
+  it("keeps an empty service item off preview and cannot publish another item's slide", () => {
+    function EmptyItemEditor() {
+      const [state, setState] = useState(() => ({ ...fixture(), sections: [...fixture().sections, "Empty"] }));
+      return (
+        <>
+          <ChurchWorkspace state={state} media={[]} cues={null} commitState={(next) => setState(next as ChurchState)} />
+          <div data-testid="output">
+            <OverlayRenderer type="church" state={state} />
+          </div>
+        </>
+      );
+    }
+    render(<EmptyItemEditor />);
+    fireEvent.click(within(screen.getByRole("navigation", { name: "Service order" })).getByRole("button", { name: /Empty/ }));
+    expect(screen.getByRole("group", { name: "Selected slide preview" })).toHaveTextContent("No slide selected");
+    expect(screen.getByRole("button", { name: "Show slide" })).toBeDisabled();
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(screen.getByTestId("output")).toHaveTextContent("Welcome everyone");
+  });
   it("previews another item safely and advances live in service order instead of the preview selection", () => {
     render(<Editor />);
     const output = screen.getByTestId("output");
@@ -43,7 +62,7 @@ describe("Sunday service operation", () => {
     fireEvent.click(screen.getByRole("button", { name: "Next" }));
     expect(output).toHaveTextContent("First verse");
     expect(screen.getByTestId("stage")).toHaveTextContent("Sing together");
-    fireEvent.keyDown(screen.getByRole("button", { name: "Preview Song · 1" }), { key: "ArrowRight" });
+    fireEvent.keyDown(screen.getByRole("button", { name: /^Preview Song · 1, slide/ }), { key: "ArrowRight" });
     expect(output).toHaveTextContent("Sing together");
   });
   it("blackout and text clear restore the exact live content; shortcuts do not fire while typing or held", () => {

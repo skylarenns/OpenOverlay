@@ -42,6 +42,13 @@ export interface HealthResponse {
   compatibility?: ReturnType<typeof openOverlayCompatibility>;
 }
 
+export interface BackupStatus {
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  overdue: boolean;
+  failedSinceSuccess: boolean;
+}
+
 export interface User {
   id: string;
   email: string;
@@ -90,6 +97,7 @@ const REALTIME_ERROR_MESSAGES = [
   "Realtime connection failed",
   "Incompatible OpenOverlay API or realtime version",
   "Overlay not found",
+  "Stage not found",
   "Authentication required",
   "Preset not found"
 ] as const;
@@ -112,6 +120,29 @@ export class ApiError extends Error {
 
 export const AUTH_EXPIRED_EVENT = "openoverlay:auth-expired";
 let authGeneration = 0;
+let serverSupportsMutationReceipts = false;
+const pendingMutationKeys = new Map<string, string>();
+
+async function receiptMutation<T>(path: string, options: RequestInit, parse: (body: unknown) => T): Promise<T> {
+  const signature = `${path}\n${String(options.body ?? "")}\n${new Headers(options.headers).get("If-Match") ?? ""}`;
+  const key = pendingMutationKeys.get(signature) ?? crypto.randomUUID();
+  pendingMutationKeys.set(signature, key);
+  if (pendingMutationKeys.size > 100) pendingMutationKeys.delete(pendingMutationKeys.keys().next().value!);
+  const headers = new Headers(options.headers);
+  headers.set("Idempotency-Key", key);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = parse(await api<unknown>(path, { ...options, headers }));
+      pendingMutationKeys.delete(signature);
+      return result;
+    } catch (error) {
+      const ambiguous = (error instanceof ApiError && error.status === 0) || error instanceof TypeError;
+      if (!ambiguous) pendingMutationKeys.delete(signature);
+      if (!ambiguous || !serverSupportsMutationReceipts || attempt > 0) throw error;
+    }
+  }
+  throw new Error("Mutation recovery failed");
+}
 
 function shouldBroadcastAuthExpiration(path: string): boolean {
   return path !== "/api/auth/me" && path !== "/api/auth/login" && path !== "/api/auth/signup";
@@ -181,7 +212,9 @@ export const authApi = {
     return { user };
   },
   async logout() {
-    return expectOk(await api<unknown>("/api/auth/logout", { method: "POST" }));
+    const result = expectOk(await api<unknown>("/api/auth/logout", { method: "POST" }));
+    pendingMutationKeys.clear();
+    return result;
   },
   async me() {
     return { user: expectEnvelope(await api<unknown>("/api/auth/me"), "user", isUser) };
@@ -199,7 +232,9 @@ export const presetApi = {
     return { preset: expectEnvelope(await api<unknown>(`/api/presets/${id}`, { signal }), "preset", isPreset) };
   },
   async patch(id: string, input: { name?: string; state?: PresetState; statePatch?: Partial<PresetState>; expectedRevision?: number }) {
-    return { preset: expectEnvelope(await api<unknown>(`/api/presets/${id}`, { method: "PATCH", body: JSON.stringify(input) }), "preset", isPreset) };
+    return {
+      preset: await receiptMutation(`/api/presets/${id}`, { method: "PATCH", body: JSON.stringify(input) }, (body) => expectEnvelope(body, "preset", isPreset))
+    };
   },
   async remove(id: string, expectedRevision: number) {
     return expectOk(
@@ -225,23 +260,47 @@ export const presetApi = {
     return { events: expectArrayEnvelope(await api<unknown>(`/api/presets/${id}/events`), "events", isPresetEvent) };
   },
   async action(id: string, action: string, payload: Record<string, unknown> = {}, expectedRevision?: number) {
-    const body = await api<unknown>(`/api/presets/${id}/actions/${action}`, {
-      method: "POST",
-      body: JSON.stringify(expectedRevision === undefined ? payload : { ...payload, expectedRevision })
-    });
-    return { preset: expectEnvelope(body, "preset", isPreset) };
+    const preset = await receiptMutation(
+      `/api/presets/${id}/actions/${action}`,
+      {
+        method: "POST",
+        body: JSON.stringify(expectedRevision === undefined ? payload : { ...payload, expectedRevision })
+      },
+      (body) => expectEnvelope(body, "preset", isPreset)
+    );
+    return { preset };
   }
 };
 
 export const overlayApi = {
   async get(publicId: string, signal?: AbortSignal) {
     return { overlay: expectEnvelope(await api<unknown>(`/api/overlay/${publicId}`, { signal }), "overlay", isPreset) };
+  },
+  async getStage(publicId: string, stageKey: string, signal?: AbortSignal) {
+    return {
+      overlay: expectEnvelope(await api<unknown>(`/api/stage/${publicId}`, { signal, headers: { "X-OpenOverlay-Stage-Key": stageKey } }), "overlay", isPreset)
+    };
+  }
+};
+
+export const stageApi = {
+  async getKey(presetId: string) {
+    return api<{ stageKey: string | null; publicId: string }>(`/api/presets/${presetId}/stage`);
+  },
+  async rotate(presetId: string) {
+    return api<{ stageKey: string; publicId: string }>(`/api/presets/${presetId}/stage/rotate`, { method: "POST" });
+  },
+  async revoke(presetId: string) {
+    return api<{ ok: true }>(`/api/presets/${presetId}/stage`, { method: "DELETE" });
   }
 };
 
 export const statusApi = {
+  async backup(signal?: AbortSignal): Promise<BackupStatus> {
+    return (await api<{ backup: BackupStatus }>("/api/operations/backup", { signal })).backup;
+  },
   async health(signal?: AbortSignal): Promise<HealthResponse> {
-    return withRequestTimeout(signal, HEALTH_REQUEST_TIMEOUT_MS, async (requestSignal) => {
+    const health = await withRequestTimeout(signal, HEALTH_REQUEST_TIMEOUT_MS, async (requestSignal) => {
       const response = await fetch(`${API_BASE}/health`, {
         cache: "no-store",
         credentials: "include",
@@ -263,6 +322,8 @@ export const statusApi = {
       if (!("ok" in body) || body.ok !== true) throw new ApiError("Health check did not report ok=true", response.status, body);
       return body as HealthResponse;
     });
+    serverSupportsMutationReceipts = health.compatibility?.features?.mutationReceipts === true;
+    return health;
   }
 };
 

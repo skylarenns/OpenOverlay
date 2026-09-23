@@ -3,9 +3,11 @@ import { isIP } from "node:net";
 import cookie from "cookie";
 import { Server, type Socket } from "socket.io";
 import { type PresetRow } from "./db.js";
+import type { PresetState } from "@openoverlay/shared";
 import { verifySessionToken, sessionCookieName } from "./auth.js";
-import { materializeState, readStoredPresetState } from "./state.js";
+import { materializeState, publicOverlayState, readStoredPresetState } from "./state.js";
 import type { AppContext } from "./types.js";
+import { validStageKey } from "./stage.js";
 import {
   OPENOVERLAY_API_VERSION,
   OPENOVERLAY_REALTIME_VERSION,
@@ -19,6 +21,7 @@ export interface RealtimeHub {
   broadcastPresetDeleted(row: PresetRow): void;
   broadcastConnectionCount(row: PresetRow): void;
   disconnectUser(userId: string): void;
+  disconnectStage(publicId: string): void;
   getOverlayClientCount(publicId: string): number;
   getConnectionCount(): number;
   getConnectionCountForIp(ip: string): number;
@@ -39,7 +42,15 @@ interface AdminConnectionRequest {
   realtimeVersion?: string;
 }
 
-type RealtimeConnectionRequest = OverlayConnectionRequest | AdminConnectionRequest;
+interface StageConnectionRequest {
+  role: "stage";
+  overlayId: string;
+  stageKey: string;
+  apiVersion?: string;
+  realtimeVersion?: string;
+}
+
+type RealtimeConnectionRequest = OverlayConnectionRequest | AdminConnectionRequest | StageConnectionRequest;
 
 export function attachRealtime(server: HttpServer, ctx: AppContext): RealtimeHub {
   const overlayClients = new Map<string, Set<string>>();
@@ -78,13 +89,16 @@ export function attachRealtime(server: HttpServer, ctx: AppContext): RealtimeHub
       const state = materializeState(stored.state);
       if (stored.recovered) ctx.logger.warn("preset_state_recovered", { presetId: row.id, source: "realtime" });
       io.to(`overlay:${row.public_id}`).emit("state:update", publicPayload(row, state, stored.recovered));
+      io.to(`stage:${row.public_id}`).emit("state:update", stagePayload(row, state, stored.recovered));
       io.to(`admin:${row.id}`).emit("preset:update", privatePayload(row, state, hub.getOverlayClientCount(row.public_id), stored.recovered));
     },
     broadcastPresetDeleted(row) {
       const payload = { id: row.id, publicId: row.public_id, revision: row.revision };
       io.to(`overlay:${row.public_id}`).emit("preset:deleted", payload);
+      io.to(`stage:${row.public_id}`).emit("preset:deleted", payload);
       io.to(`admin:${row.id}`).emit("preset:deleted", payload);
       io.in(`overlay:${row.public_id}`).disconnectSockets(true);
+      io.in(`stage:${row.public_id}`).disconnectSockets(true);
       io.in(`admin:${row.id}`).disconnectSockets(true);
     },
     broadcastConnectionCount(row) {
@@ -92,6 +106,9 @@ export function attachRealtime(server: HttpServer, ctx: AppContext): RealtimeHub
     },
     disconnectUser(userId) {
       io.in(`user:${userId}`).disconnectSockets(true);
+    },
+    disconnectStage(publicId) {
+      io.in(`stage:${publicId}`).disconnectSockets(true);
     },
     getOverlayClientCount(publicId) {
       return overlayClients.get(publicId)?.size || 0;
@@ -196,6 +213,33 @@ async function handleSocket(socket: Socket, ctx: AppContext, hub: RealtimeHub, o
     return;
   }
 
+  if (request.role === "stage") {
+    const row = ctx.db.getPresetByPublicId(request.overlayId);
+    if (!row || !validStageKey(row.stage_key, request.stageKey)) {
+      socket.emit("error:message", { error: "Stage not found" });
+      socket.disconnect(true);
+      return;
+    }
+    await socket.join(`stage:${row.public_id}`);
+    const current = ctx.db.getPresetByPublicId(request.overlayId);
+    if (!socket.connected || !current || !validStageKey(current.stage_key, request.stageKey)) {
+      socket.disconnect(true);
+      return;
+    }
+    const set = overlayClients.get(row.public_id) || new Set<string>();
+    set.add(socket.id);
+    overlayClients.set(row.public_id, set);
+    socket.once("disconnect", () => {
+      set.delete(socket.id);
+      if (set.size === 0) overlayClients.delete(row.public_id);
+      hub.broadcastConnectionCount(row);
+    });
+    const stored = readStoredPresetState(current);
+    socket.emit("state:update", stagePayload(current, materializeState(stored.state), stored.recovered));
+    hub.broadcastConnectionCount(row);
+    return;
+  }
+
   if (request.role === "admin") {
     const user = authenticateSocket(socket, ctx);
     if (!user) {
@@ -221,6 +265,20 @@ async function handleSocket(socket: Socket, ctx: AppContext, hub: RealtimeHub, o
     }
     await socket.join(`admin:${row.id}`);
     if (!socket.connected) return;
+    let expiryTimer: NodeJS.Timeout | undefined;
+    const scheduleExpiry = () => {
+      const delay = Math.max(1, Math.min(currentUser.expiresAtMs - Date.now(), 2_147_483_647));
+      expiryTimer = setTimeout(() => {
+        if (!socket.connected) return;
+        if (!authenticateSocket(socket, ctx)) {
+          socket.emit("error:message", { error: "Authentication required" });
+          socket.disconnect(true);
+        } else scheduleExpiry();
+      }, delay);
+      expiryTimer.unref();
+    };
+    scheduleExpiry();
+    socket.once("disconnect", () => clearTimeout(expiryTimer));
     const stored = readStoredPresetState(row);
     socket.emit("preset:update", privatePayload(row, materializeState(stored.state), hub.getOverlayClientCount(row.public_id), stored.recovered));
     socket.emit("overlay:clients", { presetId: row.id, publicId: row.public_id, count: hub.getOverlayClientCount(row.public_id) });
@@ -238,7 +296,7 @@ function authenticateSocket(socket: Socket, ctx: AppContext) {
     const payload = verifySessionToken(token, ctx.config.jwtSecret);
     if (!payload) continue;
     const user = ctx.db.findUserById(payload.sub);
-    if (user && user.session_version === payload.ver) return { id: user.id, email: user.email };
+    if (user && user.session_version === payload.ver) return { id: user.id, email: user.email, expiresAtMs: payload.exp * 1000 };
   }
   return null;
 }
@@ -254,12 +312,17 @@ function parseRealtimeRequest(socket: Socket): RealtimeConnectionRequest {
   // The token is read separately by authenticateSocket, but validate its shape
   // here so non-string or oversized values never reach session verification.
   stringParameter(socket, "token", 4_096);
+  if (Object.hasOwn(socket.handshake.query, "stageKey")) throw new Error("Stage key must be in socket authentication");
+  const stageKey = stringParameter(socket, "stageKey", 128);
 
   if (role === "overlay" && overlayId && !presetId && (client === undefined || client === "overlay" || client === "preview")) {
     return { role, overlayId, client: client || "overlay", apiVersion, realtimeVersion };
   }
   if (role === "admin" && presetId && !overlayId && client === undefined) {
     return { role, presetId, apiVersion, realtimeVersion };
+  }
+  if (role === "stage" && overlayId && stageKey && !presetId && client === undefined) {
+    return { role, overlayId, stageKey, apiVersion, realtimeVersion };
   }
   throw new Error("Invalid realtime connection shape");
 }
@@ -327,7 +390,7 @@ function publicPayload(row: PresetRow, state: unknown, recovered = false) {
     type: row.type,
     revision: row.revision,
     stateRecovered: recovered || undefined,
-    state,
+    state: publicOverlayState(state as PresetState),
     updatedAt: row.updated_at
   };
 }
@@ -335,6 +398,11 @@ function publicPayload(row: PresetRow, state: unknown, recovered = false) {
 function privatePayload(row: PresetRow, state: unknown, overlayClientCount: number, recovered = false) {
   return {
     ...publicPayload(row, state, recovered),
+    state,
     overlayClientCount
   };
+}
+
+function stagePayload(row: PresetRow, state: PresetState, recovered = false) {
+  return { ...publicPayload(row, state, recovered), state };
 }

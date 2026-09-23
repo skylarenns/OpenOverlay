@@ -1,5 +1,7 @@
 # OpenOverlay Pre-Release QA, Reliability, and Regression Audit
 
+Historical snapshot for the August 2026 baseline. Counts, deployment status, and recommendations below describe that audit date, not the current checkout or production state.
+
 ## Remediation update — 2026-08-13
 
 Release A (`1d17f40`) replaces the in-process Git/npm updater with immutable, checksummed release archives, a root-owned deployment controller, atomic `current`/`previous` symlinks, a Unix activity-control socket, health-gated rollback, hardened systemd units, verified online backups, restore smoke tests, CI-gated exact-SHA deployment, staged Vercel promotion, and dedicated-tunnel normalization tooling. GitHub CI run `31668698414` passed for the exact Release A SHA. The legacy production updater is currently fail-closed through an untracked sentinel, and verified initial plus pre-deploy snapshots were retained without interrupting an overlay.
