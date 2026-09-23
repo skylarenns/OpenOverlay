@@ -402,7 +402,12 @@ run_command() {
   esac
 }
 
-if [[ "${OPENOVERLAY_DEPLOY_LIBRARY_ONLY:-}" != "1" ]]; then
+if [[ "${OPENOVERLAY_DEPLOY_LIBRARY_ONLY:-}" == "1" ]]; then
+  if [[ "${1:-}" == "verify-archive" ]]; then
+    [[ $# -eq 3 ]] || fail "usage: verify-archive PATH SHA"
+    verify_archive "$2" "$3"
+  fi
+else
   require_root
   install -d -m 0750 -o root -g openoverlay "$RELEASE_ROOT" "$RELEASES_DIR"
   install -d -m 0700 -o root -g root "$BACKUP_ROOT"

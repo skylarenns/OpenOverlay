@@ -154,5 +154,9 @@ describe("auth", () => {
     const actions = new AuthRateLimiter();
     for (let index = 0; index < 600; index += 1) actions.reserveAction("preset-1", "127.0.0.2", 1_000);
     expect(() => actions.reserveAction("preset-1", "127.0.0.2", 1_000)).toThrow(/Too many action requests/);
+
+    const reads = new AuthRateLimiter();
+    for (let index = 0; index < 120; index += 1) reads.reserveSensitiveRead("user-1", "127.0.0.3", 1_000);
+    expect(() => reads.reserveSensitiveRead("user-1", "127.0.0.3", 1_000)).toThrow(/Too many sensitive read requests/);
   });
 });

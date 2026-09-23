@@ -289,7 +289,8 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
     res.json({ user: serializeUser(req.user!) });
   });
 
-  api.get("/operations/backup", requireAuth, (_req, res) => {
+  api.get("/operations/backup", requireAuth, (req, res) => {
+    authRateLimiter.reserveSensitiveRead(req.user!.id, req.ip || "unknown");
     const statusFile = path.join(path.dirname(ctx.config.databasePath), "backup-status.json");
     let recorded: Record<string, unknown> = {};
     try {
@@ -412,6 +413,7 @@ export function createBackendApp(configOverrides: Partial<AppConfig> = {}): Back
   });
 
   api.get("/presets/:id/stage", requireAuth, (req, res) => {
+    authRateLimiter.reserveSensitiveRead(req.user!.id, req.ip || "unknown");
     const row = db.getPresetForUser(routeParam(req, "id"), req.user!.id);
     if (!row) return void res.status(404).json({ error: "Preset not found" });
     res.setHeader("Cache-Control", "no-store");
@@ -1364,11 +1366,15 @@ async function saveMediaUpload(ctx: AppContext, ownerUserId: string, file: Expre
     }
   }
 
-  const safeBase = path
+  const normalizedBase = path
     .basename(file.originalname, path.extname(file.originalname))
     .replace(/[^a-z0-9_-]+/gi, "-")
-    .replace(/^-+|-+$/g, "")
     .slice(0, 80);
+  let first = 0;
+  let last = normalizedBase.length;
+  while (normalizedBase[first] === "-") first += 1;
+  while (normalizedBase[last - 1] === "-") last -= 1;
+  const safeBase = normalizedBase.slice(first, last);
   const filename = `${randomUUID()}-${safeBase || "upload"}${extension}`;
   const filePath = path.join(ctx.config.uploadDir, filename);
   const stagingPath = `${filePath}${MEDIA_UPLOAD_STAGING_MARKER}${randomUUID()}`;
@@ -1532,7 +1538,24 @@ function dbSafeCreatePreset(ctx: AppContext, ownerUserId: string, snapshot: { na
 function validateSvg(buffer: Buffer): void {
   if (buffer.includes(0)) throw new UploadValidationError("Invalid SVG encoding");
   const svg = buffer.toString("utf8").replace(/^\uFEFF/, "");
-  if (!/^\s*(?:<\?xml[^>]*>\s*)?(?:<!--[^]*?-->\s*)*<svg(?:\s|>)/i.test(svg)) {
+  let offset = 0;
+  const skipWhitespace = () => {
+    while (offset < svg.length && /\s/.test(svg[offset])) offset += 1;
+  };
+  skipWhitespace();
+  if (svg.slice(offset, offset + 5).toLowerCase() === "<?xml") {
+    const end = svg.indexOf(">", offset + 5);
+    if (end < 0) throw new UploadValidationError("Invalid SVG");
+    offset = end + 1;
+    skipWhitespace();
+  }
+  while (svg.startsWith("<!--", offset)) {
+    const end = svg.indexOf("-->", offset + 4);
+    if (end < 0) throw new UploadValidationError("Invalid SVG");
+    offset = end + 3;
+    skipWhitespace();
+  }
+  if (svg.slice(offset, offset + 4).toLowerCase() !== "<svg" || !/\s|>/.test(svg[offset + 4] || "")) {
     throw new UploadValidationError("Invalid SVG");
   }
   if (

@@ -33,7 +33,7 @@ function validateArchive(entries: TarEntry[]) {
   directories.push(directory);
   const archive = path.join(directory, "release.tar.gz");
   fs.writeFileSync(archive, gzipSync(createTar(entries)));
-  return spawnSync("bash", ["-c", 'source "$1"; verify_archive "$2" "$3"', "verify", deployHelper, archive, archiveCommit], {
+  return spawnSync("bash", [deployHelper, "verify-archive", archive, archiveCommit], {
     cwd: repositoryRoot,
     encoding: "utf8",
     env: { ...process.env, OPENOVERLAY_DEPLOY_LIBRARY_ONLY: "1" }
