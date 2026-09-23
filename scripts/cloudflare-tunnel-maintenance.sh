@@ -23,10 +23,10 @@ assert_overlay_inactive() {
   STATUS_JSON="$status" /usr/bin/node -e '
     const state=JSON.parse(process.env.STATUS_JSON);
     if (!state.gatewayHealthy || !state.activeChildHealthy) process.exit(1);
-    if (Number(state.connections?.overlay) > 0 || Number(state.inFlightMutations) > 0) process.exit(75);
+    if (Number(state.connections?.overlay) > 0 || Number(state.connections?.stage) > 0 || Number(state.inFlightMutations) > 0) process.exit(75);
   ' || {
     result=$?
-    [[ "$result" -eq 75 ]] && fail "maintenance deferred by active overlay or mutation"
+    [[ "$result" -eq 75 ]] && fail "maintenance deferred by active output, stage display, or mutation"
     fail "gateway is unhealthy"
   }
 }
@@ -63,9 +63,12 @@ normalize() {
   require_root
   assert_overlay_inactive
   [[ -r "$DEDICATED_CONFIG" && -r "$UNIFIED_CONFIG" ]] || fail "tunnel configuration is unreadable"
-  local dedicated_temporary temporary dedicated_backup backup stamp hostname
-  dedicated_temporary="$(mktemp /home/skylarenns/.cloudflared/openoverlay-api.XXXXXXXX)"
-  temporary="$(mktemp /etc/cloudflared/config.openoverlay.XXXXXXXX)"
+  local dedicated_temporary temporary dedicated_directory temporary_directory dedicated_backup backup stamp hostname
+  dedicated_directory="$(mktemp -d /home/skylarenns/.cloudflared/openoverlay-api.XXXXXXXX)"
+  temporary_directory="$(mktemp -d /etc/cloudflared/config.openoverlay.XXXXXXXX)"
+  chown skylarenns:skylarenns "$dedicated_directory"
+  dedicated_temporary="$dedicated_directory/config.yml"
+  temporary="$temporary_directory/config.yml"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   dedicated_backup="${DEDICATED_CONFIG}.before-normalize-${stamp}"
   backup="/etc/cloudflared/config.yml.before-openoverlay-${stamp}"
@@ -91,6 +94,7 @@ normalize() {
   mv -- "$temporary" "$UNIFIED_CONFIG"
   systemctl reload-or-restart cloudflared.service
   audit
+  rmdir "$dedicated_directory" "$temporary_directory"
   trap - EXIT
   printf 'Dedicated and unified tunnels normalized; recoverable backups: %s %s\n' "$dedicated_backup" "$backup"
 }

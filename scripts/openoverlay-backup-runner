@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly BACKUP_SCRIPT=/usr/local/libexec/openoverlay/openoverlay-backup.mjs
+readonly STATUS_FILE=/var/lib/openoverlay/backup-status.json
+readonly BACKUP_ROOT="${OPENOVERLAY_BACKUP_ROOT:-/var/backups/openoverlay}"
+
+fail_backup() {
+  /usr/bin/node "$BACKUP_SCRIPT" failure --message "$1" --status-file "$STATUS_FILE" >&2 || true
+  exit 1
+}
+
+health="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/health)" || fail_backup "Backend health unavailable when scheduled backup started"
+build_sha="$(HEALTH_JSON="$health" /usr/bin/node -e '
+  const health = JSON.parse(process.env.HEALTH_JSON);
+  const sha = health.build?.commit;
+  if (health.ok !== true || !/^[0-9a-f]{40}$/.test(sha)) process.exit(1);
+  process.stdout.write(sha);
+')" || fail_backup "Backend health lacks a valid build identity"
+
+exec /usr/bin/node "$BACKUP_SCRIPT" create \
+  --kind daily \
+  --root "$BACKUP_ROOT" \
+  --database /var/lib/openoverlay/openoverlay.sqlite \
+  --uploads /var/lib/openoverlay/uploads \
+  --build-sha "$build_sha" \
+  --status-file "$STATUS_FILE"

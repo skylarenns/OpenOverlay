@@ -63,6 +63,7 @@ const backendDeploy = fs.readFileSync(backendDeployFile, "utf8");
 for (const fragment of [
   "git ls-remote origin refs/heads/main",
   "git fetch origin main",
+  "flock -n 9",
   "git switch --detach",
   "npm ci --include=dev",
   "kill -TERM",
@@ -84,7 +85,10 @@ for (const fragment of [
   "flock -n 9",
   "MAX_ARCHIVE_BYTES=268435456",
   "tar -tzf",
+  "git get-tar-commit-id",
   "restore-verify",
+  "BACKUP_CONFIG_FILE",
+  "privacyEpoch: shared.openOverlayCompatibility().features?.stage === true ? 1 : 0",
   "assert_promotion_safe",
   "atomic_link",
   "wait_for_release"

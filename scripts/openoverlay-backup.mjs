@@ -1,28 +1,53 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { DatabaseSync, backup } from "node:sqlite";
+import { stageRestore } from "./openoverlay-restore-stage.mjs";
 
 const FORMAT_VERSION = 1;
 const TOOL_VERSION = "1.0.0";
 const MINIMUM_FREE_BYTES = 50 * 1024 ** 3;
 const RETENTION = { daily: 7, weekly: 4, predeploy: 3 };
 
+const [command = "help", ...argv] = process.argv.slice(2);
+let options = {};
 try {
-  const [command = "help", ...argv] = process.argv.slice(2);
-  const options = parseOptions(argv);
+  options = parseOptions(argv);
   if (command === "create") await createSnapshot(options);
   else if (command === "verify") await verifySnapshot(requiredOption(options, "snapshot"));
-  else if (command === "media-audit") await auditLiveMedia(options);
+  else if (command === "status") backupStatus(options);
+  else if (command === "failure") {
+    recordBackupStatus(options, { lastFailureAt: new Date().toISOString(), lastError: requiredOption(options, "message").slice(0, 300) });
+    throw new Error(options.message);
+  } else if (command === "media-audit") await auditLiveMedia(options);
   else if (command === "restore-verify") await verifyRestore(options);
-  else if (command === "restore" && options.activate === "true") await activateRestore(options);
-  else usage();
+  else if (command === "restore" && options.activate === "true") {
+    if (process.env.OPENOVERLAY_RESTORE_LOCKED !== "1") {
+      const lock = options.lock || "/run/lock/openoverlay-deploy.lock";
+      const child = spawnSync("flock", ["-n", lock, process.execPath, process.argv[1], ...process.argv.slice(2)], {
+        stdio: "inherit",
+        env: { ...process.env, OPENOVERLAY_RESTORE_LOCKED: "1" }
+      });
+      if (child.error) throw child.error;
+      process.exitCode = child.status ?? 1;
+    } else await activateRestore(options);
+  } else usage();
 } catch (error) {
+  if (command === "create") {
+    try {
+      recordBackupStatus(options, {
+        lastFailureAt: new Date().toISOString(),
+        lastError: error instanceof Error ? error.message.slice(0, 300) : "Backup failed"
+      });
+    } catch {
+      // Keep the original backup failure as the reported error.
+    }
+  }
   console.error(error instanceof Error ? error.message : "Backup operation failed");
   process.exitCode = 1;
 }
@@ -35,7 +60,7 @@ async function createSnapshot(options) {
   const kind = options.kind || "daily";
   if (kind !== "daily" && kind !== "predeploy") throw new Error("--kind must be daily or predeploy");
   ensureSecureDirectory(root);
-  ensureFreeSpace(root);
+  ensureFreeSpace(root, options["minimum-free-bytes"]);
 
   const createdAt = new Date();
   const stamp = createdAt.toISOString().replaceAll(/[-:]/g, "").replace(".", "-");
@@ -60,7 +85,7 @@ async function createSnapshot(options) {
     const mediaRows = readMediaRows(copy);
     copy.close();
 
-    const previousFiles = indexPreviousFiles(root);
+    const previousFiles = await indexPreviousFiles(root);
     const media = [];
     for (const row of mediaRows) {
       for (const item of mediaFilesForRow(row)) {
@@ -94,10 +119,11 @@ async function createSnapshot(options) {
       media
     };
     writeJson(path.join(stagingDirectory, "manifest.json"), manifest);
+    await verifySnapshotContents(stagingDirectory, manifest);
     fs.writeFileSync(path.join(stagingDirectory, ".valid"), `${manifest.database.sha256}\n`, { mode: 0o600 });
     fs.renameSync(stagingDirectory, finalDirectory);
-    await verifySnapshot(finalDirectory, true);
-    pruneSnapshots(root);
+    recordBackupStatus(options, { lastSuccessAt: new Date().toISOString(), lastSuccessfulSnapshot: finalDirectory, lastError: null });
+    await pruneSnapshots(root);
     console.log(JSON.stringify({ ok: true, snapshot: finalDirectory, buildSha, schemaVersion, mediaFiles: media.length }));
   } catch (error) {
     fs.rmSync(stagingDirectory, { recursive: true, force: true, maxRetries: 3 });
@@ -105,11 +131,45 @@ async function createSnapshot(options) {
   }
 }
 
+function backupStatus(options) {
+  const status = readBackupStatus(options);
+  const maximumAgeHours = Number(options["overdue-hours"] || 36);
+  if (!Number.isFinite(maximumAgeHours) || maximumAgeHours <= 0) throw new Error("--overdue-hours must be positive");
+  const successTime = Date.parse(status.lastSuccessAt || "");
+  const overdue = !Number.isFinite(successTime) || Date.now() - successTime > maximumAgeHours * 60 * 60_000;
+  const failedSinceSuccess = Boolean(status.lastFailureAt && status.lastError);
+  console.log(JSON.stringify({ ...status, overdue, failedSinceSuccess }));
+}
+
+function readBackupStatus(options) {
+  const file = path.resolve(options["status-file"] || path.join(options.root || "/var/backups/openoverlay", "status.json"));
+  if (!fs.existsSync(file)) return { lastSuccessAt: null, lastSuccessfulSnapshot: null, lastFailureAt: null, lastError: null };
+  return JSON.parse(fs.readFileSync(file, "utf8"));
+}
+
+function recordBackupStatus(options, update) {
+  const file = path.resolve(options["status-file"] || path.join(options.root || "/var/backups/openoverlay", "status.json"));
+  const current = readBackupStatus(options);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, `${JSON.stringify({ ...current, ...update })}\n`, { mode: 0o644, flag: "wx" });
+  fs.renameSync(temporary, file);
+}
+
 async function verifySnapshot(snapshotInput, quiet = false) {
   const snapshot = path.resolve(snapshotInput);
   const validPath = path.join(snapshot, ".valid");
   const manifest = readManifest(snapshot);
-  if (!fs.existsSync(validPath)) throw new Error(`Snapshot is not marked valid: ${snapshot}`);
+  if (!fs.existsSync(validPath) || fs.readFileSync(validPath, "utf8").trim() !== manifest.database.sha256) {
+    throw new Error(`Snapshot has no matching validity marker: ${snapshot}`);
+  }
+  const result = await verifySnapshotContents(snapshot, manifest);
+  if (!quiet)
+    console.log(JSON.stringify({ ok: true, snapshot, buildSha: manifest.buildSha, integrityCheck: result.integrity, mediaFiles: manifest.media.length }));
+  return manifest;
+}
+
+async function verifySnapshotContents(snapshot, manifest) {
   const databasePath = path.join(snapshot, "openoverlay.sqlite");
   const databaseHash = await hashFile(databasePath);
   if (databaseHash.sha256 !== manifest.database.sha256 || databaseHash.byteSize !== manifest.database.byteSize) {
@@ -126,8 +186,7 @@ async function verifySnapshot(snapshotInput, quiet = false) {
       throw new Error(`Backup media checksum mismatch for row ${item.rowId}`);
     }
   }
-  if (!quiet) console.log(JSON.stringify({ ok: true, snapshot, buildSha: manifest.buildSha, integrityCheck: integrity, mediaFiles: manifest.media.length }));
-  return manifest;
+  return { integrity };
 }
 
 async function auditLiveMedia(options) {
@@ -153,56 +212,70 @@ async function verifyRestore(options) {
   const release = path.resolve(options.release || "/opt/openoverlay/current");
   const manifest = await verifySnapshot(snapshot, true);
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "openoverlay-restore-"));
-  const databasePath = path.join(temporary, "openoverlay.sqlite");
-  const uploadDir = path.join(temporary, "uploads");
-  fs.mkdirSync(uploadDir, { mode: 0o700 });
-  fs.copyFileSync(path.join(snapshot, "openoverlay.sqlite"), databasePath);
-  for (const item of manifest.media) {
-    const destination = path.join(uploadDir, path.basename(item.originalPath));
-    fs.copyFileSync(path.join(snapshot, "media", safeBasename(item.backupName)), destination);
-  }
-
-  const port = await freePort();
-  const entrypoint = path.join(release, "apps/backend/dist/index.js");
-  if (!fs.existsSync(entrypoint)) throw new Error(`Compiled backend not found: ${entrypoint}`);
-  const child = spawn(process.execPath, [entrypoint], {
-    cwd: path.join(release, "apps/backend"),
-    env: {
-      ...process.env,
-      NODE_ENV: "test",
-      HOST: "127.0.0.1",
-      PORT: String(port),
-      DATABASE_PATH: databasePath,
-      UPLOAD_DIR: uploadDir,
-      LOG_FILE: path.join(temporary, "backend.log"),
-      JWT_SECRET: "restore-verification-only-secret",
-      CORS_ORIGINS: "http://127.0.0.1:5173",
-      FRONTEND_URL: "http://127.0.0.1:5173",
-      OPENOVERLAY_GIT_SHA: manifest.buildSha
-    },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let stderr = "";
-  child.stderr?.on("data", (chunk) => {
-    stderr += String(chunk);
-  });
+  let child;
   try {
-    await waitForHealth(port, manifest.buildSha);
-    const email = `restore-${randomUUID()}@example.invalid`;
-    const signup = await jsonRequest(port, "/api/v1/auth/signup", "POST", { email, password: `Restore-${randomUUID()}` });
-    if (signup.status !== 201) throw new Error(`Restore auth smoke failed with HTTP ${signup.status}`);
-    const cookie = signup.headers.get("set-cookie")?.split(";")[0];
-    if (!cookie) throw new Error("Restore auth smoke did not return a session cookie");
-    const preset = await jsonRequest(port, "/api/v1/presets", "POST", { name: "Restore Drill", type: "soccer" }, cookie);
-    if (preset.status !== 201) throw new Error(`Restore preset smoke failed with HTTP ${preset.status}`);
-    const media = await jsonRequest(port, "/api/v1/media?limit=24", "GET", undefined, cookie);
-    if (media.status !== 200) throw new Error(`Restore media smoke failed with HTTP ${media.status}`);
-    console.log(JSON.stringify({ ok: true, snapshot, release, buildSha: manifest.buildSha, smoke: ["auth", "preset", "media"] }));
-  } catch (error) {
-    throw new Error(`${error instanceof Error ? error.message : String(error)}${stderr ? `; backend: ${stderr.slice(-500)}` : ""}`);
+    const { databasePath, stagedUploadDir: uploadDir } = await stageRestore(snapshot, manifest, temporary);
+    const port = await freePort();
+    const entrypoint = path.join(release, "apps/backend/dist/index.js");
+    if (!fs.existsSync(entrypoint)) throw new Error(`Compiled backend not found: ${entrypoint}`);
+    child = spawn(process.execPath, [entrypoint], {
+      cwd: path.join(release, "apps/backend"),
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        HOST: "127.0.0.1",
+        PORT: String(port),
+        DATABASE_PATH: databasePath,
+        UPLOAD_DIR: uploadDir,
+        LOG_FILE: path.join(temporary, "backend.log"),
+        JWT_SECRET: "restore-verification-only-secret",
+        CORS_ORIGINS: "http://127.0.0.1:5173",
+        FRONTEND_URL: "http://127.0.0.1:5173",
+        OPENOVERLAY_GIT_SHA: manifest.buildSha
+      },
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    let stderr = "";
+    child.stderr?.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    try {
+      await waitForHealth(port, manifest.buildSha);
+      const email = `restore-${randomUUID()}@example.invalid`;
+      const signup = await jsonRequest(port, "/api/v1/auth/signup", "POST", { email, password: `Restore-${randomUUID()}` });
+      if (signup.status !== 201) throw new Error(`Restore auth smoke failed with HTTP ${signup.status}`);
+      const cookie = signup.headers.get("set-cookie")?.split(";")[0];
+      if (!cookie) throw new Error("Restore auth smoke did not return a session cookie");
+      const preset = await jsonRequest(port, "/api/v1/presets", "POST", { name: "Restore Drill", type: "soccer" }, cookie);
+      if (preset.status !== 201) throw new Error(`Restore preset smoke failed with HTTP ${preset.status}`);
+      const media = await jsonRequest(port, "/api/v1/media?limit=24", "GET", undefined, cookie);
+      if (media.status !== 200) throw new Error(`Restore media smoke failed with HTTP ${media.status}`);
+      const restoredDb = new DatabaseSync(databasePath, { readOnly: true });
+      const mediaRows = restoredDb.prepare("SELECT id, public_id, path, thumbnail_path FROM media").all();
+      restoredDb.close();
+      for (const row of mediaRows) {
+        for (const [kind, file, url] of [
+          ["original", row.path, `/api/v1/media/file/${row.public_id}`],
+          ["thumbnail", row.thumbnail_path, `/api/v1/media/thumbnail/${row.public_id}`]
+        ]) {
+          if (!file) continue;
+          const expected = manifest.media.find((item) => item.rowId === String(row.id) && item.kind === kind);
+          const response = await jsonRequest(port, url, "GET");
+          if (response.status !== 200) throw new Error(`Restored ${kind} fetch failed with HTTP ${response.status}`);
+          const bytes = Buffer.from(await response.arrayBuffer());
+          const sha256 = createHash("sha256").update(bytes).digest("hex");
+          if (!expected || bytes.length !== expected.byteSize || sha256 !== expected.sha256) throw new Error(`Restored ${kind} bytes do not match snapshot`);
+        }
+      }
+      console.log(JSON.stringify({ ok: true, snapshot, release, buildSha: manifest.buildSha, smoke: ["auth", "preset", "media", "media-bytes"] }));
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}${stderr ? `; backend: ${stderr.slice(-500)}` : ""}`);
+    }
   } finally {
-    child.kill("SIGTERM");
-    await new Promise((resolve) => child.once("exit", resolve));
+    if (child && child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGTERM");
+      await new Promise((resolve) => child.once("exit", resolve));
+    }
     fs.rmSync(temporary, { recursive: true, force: true, maxRetries: 3 });
   }
 }
@@ -215,20 +288,63 @@ async function activateRestore(options) {
   const uploadDir = path.resolve(options.uploads || "/var/lib/openoverlay/uploads");
   const manifest = await verifySnapshot(snapshot, true);
   if (process.getuid?.() !== 0) throw new Error("Live restore activation must run as root");
-  if (!options["service-stopped-marker"] || !fs.existsSync(options["service-stopped-marker"])) {
-    throw new Error("Live restore requires a deployment-controller service-stopped marker");
+  const service = options.service || "Openoverlaybackend.service";
+  assertServiceStopped(service);
+  if (!fs.existsSync(databasePath) || !fs.existsSync(uploadDir)) throw new Error("Live database and uploads must exist before restore");
+  const databaseOwner = fs.statSync(databasePath);
+  const uploadOwner = fs.statSync(uploadDir);
+  const parent = path.dirname(databasePath);
+  const staging = fs.mkdtempSync(path.join(parent, ".openoverlay-restore-stage-"));
+  const retained = path.join(parent, `.openoverlay-before-restore-${randomUUID()}`);
+  const movedDatabaseSuffixes = [];
+  let oldUploadsMoved = false;
+  let succeeded = false;
+  try {
+    const staged = await stageRestore(snapshot, manifest, staging, uploadDir);
+    fs.chownSync(staged.databasePath, databaseOwner.uid, databaseOwner.gid);
+    fs.chownSync(staged.stagedUploadDir, uploadOwner.uid, uploadOwner.gid);
+    for (const item of manifest.media) fs.chownSync(path.join(staged.stagedUploadDir, safeBasename(item.backupName)), uploadOwner.uid, uploadOwner.gid);
+    assertServiceStopped(service);
+    fs.mkdirSync(retained, { mode: 0o700 });
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const source = `${databasePath}${suffix}`;
+      if (fs.existsSync(source)) {
+        fs.renameSync(source, path.join(retained, `openoverlay.sqlite${suffix}`));
+        movedDatabaseSuffixes.push(suffix);
+      }
+    }
+    fs.renameSync(uploadDir, path.join(retained, "uploads"));
+    oldUploadsMoved = true;
+    fs.renameSync(staged.stagedUploadDir, uploadDir);
+    fs.renameSync(staged.databasePath, databasePath);
+    const restored = new DatabaseSync(databasePath, { readOnly: true });
+    const integrity = restored.prepare("PRAGMA integrity_check").get()?.integrity_check;
+    restored.close();
+    if (integrity !== "ok") throw new Error(`Activated database integrity check failed: ${String(integrity)}`);
+    succeeded = true;
+    console.log(JSON.stringify({ ok: true, activated: snapshot, database: databasePath, restoredMediaFiles: manifest.media.length, previousData: retained }));
+  } catch (error) {
+    if (movedDatabaseSuffixes.includes("") && fs.existsSync(databasePath)) fs.renameSync(databasePath, path.join(staging, "failed-openoverlay.sqlite"));
+    if (oldUploadsMoved && fs.existsSync(uploadDir)) fs.renameSync(uploadDir, path.join(staging, "failed-uploads"));
+    for (const suffix of movedDatabaseSuffixes) fs.renameSync(path.join(retained, `openoverlay.sqlite${suffix}`), `${databasePath}${suffix}`);
+    if (oldUploadsMoved) fs.renameSync(path.join(retained, "uploads"), uploadDir);
+    throw error;
+  } finally {
+    if (succeeded) fs.rmSync(staging, { recursive: true, force: true });
   }
-  const stagedDatabase = `${databasePath}.restore-${randomUUID()}`;
-  fs.copyFileSync(path.join(snapshot, "openoverlay.sqlite"), stagedDatabase);
-  const restoredFiles = new Set();
-  fs.mkdirSync(uploadDir, { recursive: true, mode: 0o750 });
-  for (const item of manifest.media) {
-    const destination = path.join(uploadDir, path.basename(item.originalPath));
-    fs.copyFileSync(path.join(snapshot, "media", safeBasename(item.backupName)), destination);
-    restoredFiles.add(destination);
-  }
-  fs.renameSync(stagedDatabase, databasePath);
-  console.log(JSON.stringify({ ok: true, activated: snapshot, database: databasePath, restoredMediaFiles: restoredFiles.size }));
+}
+
+function assertServiceStopped(service) {
+  if (!/^[A-Za-z0-9_.@-]+\.service$/.test(service)) throw new Error("Invalid service name");
+  const active = spawnSync("systemctl", ["is-active", "--quiet", service]);
+  if (active.error) throw active.error;
+  if (active.status === 0) throw new Error(`Refusing live restore while ${service} is active`);
+  const loadState = execFileSync("systemctl", ["show", "-p", "LoadState", "--value", service], { encoding: "utf8" }).trim();
+  if (loadState !== "loaded") throw new Error(`Refusing live restore: ${service} is not loaded`);
+  const pid = Number(execFileSync("systemctl", ["show", "-p", "MainPID", "--value", service], { encoding: "utf8" }).trim());
+  if (!Number.isInteger(pid) || pid !== 0) throw new Error(`Refusing live restore while ${service} has a process`);
+  const listeners = spawnSync("ss", ["-Hltpn", "( sport = :8734 or sport = :8735 or sport = :8736 )"], { encoding: "utf8" });
+  if (listeners.error || listeners.status !== 0 || listeners.stdout.trim()) throw new Error("Refusing live restore while OpenOverlay has a listener");
 }
 
 function readMediaRows(db) {
@@ -284,9 +400,16 @@ async function copyAndVerify(source, destination, previousFiles) {
     try {
       const before = fs.statSync(source);
       const sourceHash = await hashFile(source);
-      const prior = previousFiles.get(`${sourceHash.byteSize}:${sourceHash.sha256}`);
-      if (prior && isRegularFile(prior)) fs.linkSync(prior, destination);
-      else fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+      const key = `${sourceHash.byteSize}:${sourceHash.sha256}`;
+      const prior = previousFiles.get(key);
+      if (prior && isRegularFile(prior)) {
+        const priorHash = await hashFile(prior);
+        if (priorHash.byteSize === sourceHash.byteSize && priorHash.sha256 === sourceHash.sha256) fs.linkSync(prior, destination);
+        else {
+          previousFiles.delete(key);
+          fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+        }
+      } else fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
       const destinationHash = await hashFile(destination);
       const after = fs.statSync(source);
       if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || sourceHash.sha256 !== destinationHash.sha256) {
@@ -303,9 +426,9 @@ async function copyAndVerify(source, destination, previousFiles) {
   throw new Error(`Unable to copy stable media bytes from ${source}: ${lastError instanceof Error ? lastError.message : String(lastError)}`);
 }
 
-function indexPreviousFiles(root) {
+async function indexPreviousFiles(root) {
   const files = new Map();
-  for (const snapshot of validSnapshots(root).reverse()) {
+  for (const snapshot of (await verifiedSnapshots(root)).reverse()) {
     const manifest = readManifest(snapshot.path);
     for (const item of manifest.media) {
       const file = path.join(snapshot.path, "media", safeBasename(item.backupName));
@@ -315,8 +438,8 @@ function indexPreviousFiles(root) {
   return files;
 }
 
-function pruneSnapshots(root) {
-  const snapshots = validSnapshots(root);
+async function pruneSnapshots(root) {
+  const snapshots = await verifiedSnapshots(root);
   if (snapshots.length <= 1) return;
   const keep = new Set();
   for (const [label, count] of Object.entries(RETENTION)) {
@@ -346,6 +469,20 @@ function validSnapshots(root) {
   return snapshots.sort((a, b) => b.manifest.createdAt.localeCompare(a.manifest.createdAt));
 }
 
+async function verifiedSnapshots(root) {
+  const verified = [];
+  for (const snapshot of validSnapshots(root)) {
+    try {
+      await verifySnapshot(snapshot.path, true);
+      verified.push(snapshot);
+    } catch {
+      // Damaged snapshots remain for investigation, but cannot supply dedupe
+      // bytes or displace a verified recovery point during pruning.
+    }
+  }
+  return verified;
+}
+
 function readManifest(snapshot) {
   const manifest = JSON.parse(fs.readFileSync(path.join(snapshot, "manifest.json"), "utf8"));
   if (manifest.formatVersion !== FORMAT_VERSION || manifest.backupToolVersion !== TOOL_VERSION || !Array.isArray(manifest.media)) {
@@ -365,10 +502,12 @@ async function hashFile(file) {
   return { byteSize, sha256: hash.digest("hex") };
 }
 
-function ensureFreeSpace(root) {
+function ensureFreeSpace(root, override) {
+  const minimum = override === undefined ? MINIMUM_FREE_BYTES : Number(override);
+  if (!Number.isSafeInteger(minimum) || minimum < 0) throw new Error("--minimum-free-bytes must be a non-negative integer");
   const stats = fs.statfsSync(root);
   const free = Number(stats.bavail) * Number(stats.bsize);
-  if (free < MINIMUM_FREE_BYTES) throw new Error(`Backup refused: less than ${MINIMUM_FREE_BYTES} bytes free`);
+  if (free < minimum) throw new Error(`Backup refused: less than ${minimum} bytes free`);
 }
 
 function ensureSecureDirectory(directory) {
@@ -467,5 +606,5 @@ function delay(ms) {
 }
 
 function usage() {
-  throw new Error("Usage: openoverlay-backup.mjs create|verify|media-audit|restore-verify|restore [options]");
+  throw new Error("Usage: openoverlay-backup.mjs create|verify|status|failure|media-audit|restore-verify|restore [options]");
 }

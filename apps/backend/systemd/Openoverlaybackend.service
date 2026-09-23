@@ -6,7 +6,7 @@ ConditionPathIsSymbolicLink=/opt/openoverlay/current
 
 [Service]
 Type=simple
-User=openoverlay
+User=skylarenns
 Group=openoverlay
 WorkingDirectory=/opt/openoverlay/current/apps/backend
 EnvironmentFile=/etc/openoverlaybackend.env

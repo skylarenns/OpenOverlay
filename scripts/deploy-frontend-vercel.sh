@@ -125,11 +125,47 @@ node -e '
   }
 ' "${BUILD_INFO}" "${BACKEND_HEALTH}"
 
-vercel_scoped promote "${DEPLOYMENT_URL}" --yes
-PROMOTED_BUILD_INFO="$(curl -fsS --retry 8 --retry-delay 2 --retry-all-errors --connect-timeout 5 --max-time 20 "${FRONTEND_URL}/build-info.json")"
-PROMOTED_COMMIT="$(node -e 'const info=JSON.parse(process.argv[1]); process.stdout.write(info?.build?.commit || "")' "${PROMOTED_BUILD_INFO}")"
+read_live_commit() {
+  local build_info
+  build_info="$(curl -fsS --retry 8 --retry-delay 2 --retry-all-errors --connect-timeout 5 --max-time 20 "${FRONTEND_URL}/build-info.json")" || return 1
+  node -e 'const info=JSON.parse(process.argv[1]); process.stdout.write(info?.build?.commit || "")' "${build_info}"
+}
+
+# Record the exact current deployment before changing the production alias.
+# A failed promotion can have applied even if the CLI returned an error.
+PREVIOUS_COMMIT="$(read_live_commit)" || { echo "Cannot identify the current frontend build before promotion." >&2; exit 1; }
+[[ "${PREVIOUS_COMMIT}" =~ ^[0-9a-f]{40}$ ]] || { echo "Current frontend has no verifiable release SHA." >&2; exit 1; }
+PREVIOUS_DEPLOYMENT_JSON="$(vercel_scoped inspect "${FRONTEND_URL}" --format=json)"
+PREVIOUS_DEPLOYMENT_ID="$(node -e 'const info=JSON.parse(process.argv[1]); process.stdout.write(info?.id || info?.deployment?.id || "")' "${PREVIOUS_DEPLOYMENT_JSON}")"
+[[ "${PREVIOUS_DEPLOYMENT_ID}" =~ ^[A-Za-z0-9_-]+$ ]] || { echo "Cannot identify the current frontend deployment for rollback." >&2; exit 1; }
+
+restore_previous_frontend() {
+  local current_commit
+  current_commit="$(read_live_commit)" || current_commit=""
+  if [[ "${current_commit}" == "${PREVIOUS_COMMIT}" ]]; then
+    echo "Previous frontend ${PREVIOUS_COMMIT} is still serving production." >&2
+    return 0
+  fi
+  echo "Restoring previous frontend deployment ${PREVIOUS_DEPLOYMENT_ID}." >&2
+  vercel_scoped rollback "${PREVIOUS_DEPLOYMENT_ID}" --yes || { echo "Frontend rollback failed; restore deployment ${PREVIOUS_DEPLOYMENT_ID} manually." >&2; return 1; }
+  local restored_commit
+  restored_commit="$(read_live_commit)" || { echo "Frontend rollback ran, but the production build could not be read." >&2; return 1; }
+  [[ "${restored_commit}" == "${PREVIOUS_COMMIT}" ]] || {
+    echo "Frontend rollback did not restore ${PREVIOUS_COMMIT}; production reports ${restored_commit:-unknown}." >&2
+    return 1
+  }
+  echo "Previous frontend ${PREVIOUS_COMMIT} restored." >&2
+}
+
+if ! vercel_scoped promote "${DEPLOYMENT_URL}" --yes; then
+  restore_previous_frontend || true
+  echo "Frontend promotion failed; previous deployment restoration attempted." >&2
+  exit 1
+fi
+PROMOTED_COMMIT="$(read_live_commit)" || PROMOTED_COMMIT=""
 if [[ "${PROMOTED_COMMIT}" != "${EXPECTED_COMMIT}" ]]; then
-  echo "Promotion verification failed: ${FRONTEND_URL} reports ${PROMOTED_COMMIT:-unknown}; expected ${EXPECTED_COMMIT}."
+  echo "Promotion verification failed: ${FRONTEND_URL} reports ${PROMOTED_COMMIT:-unknown}; expected ${EXPECTED_COMMIT}." >&2
+  restore_previous_frontend || true
   exit 1
 fi
 

@@ -40,6 +40,10 @@ fail() {
   exit 1
 }
 
+install -d -m 0700 "$HOME/.local/state/openoverlay"
+exec 9>"$HOME/.local/state/openoverlay/deploy.lock"
+flock -n 9 || fail "another OpenOverlay deployment is already running"
+
 build_checkout() (
   set -e
   target_sha="$1"

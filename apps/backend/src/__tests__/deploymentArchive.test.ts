@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../../../..");
 const deployHelper = path.join(repositoryRoot, "scripts/openoverlay-deploy");
+const archiveCommit = "a".repeat(40);
 const directories: string[] = [];
 
 afterEach(() => {
@@ -32,7 +33,7 @@ function validateArchive(entries: TarEntry[]) {
   directories.push(directory);
   const archive = path.join(directory, "release.tar.gz");
   fs.writeFileSync(archive, gzipSync(createTar(entries)));
-  return spawnSync("bash", ["-c", 'source "$1"; verify_archive "$2"', "verify", deployHelper, archive], {
+  return spawnSync("bash", ["-c", 'source "$1"; verify_archive "$2" "$3"', "verify", deployHelper, archive, archiveCommit], {
     cwd: repositoryRoot,
     encoding: "utf8",
     env: { ...process.env, OPENOVERLAY_DEPLOY_LIBRARY_ONLY: "1" }
@@ -42,12 +43,14 @@ function validateArchive(entries: TarEntry[]) {
 interface TarEntry {
   name: string;
   content: string;
-  type?: "0" | "2";
+  type?: "0" | "2" | "g";
 }
 
 function createTar(entries: TarEntry[]): Buffer {
   const blocks: Buffer[] = [];
-  for (const entry of entries) {
+  // Git archives carry the commit in a global PAX comment. Keep the test
+  // archive realistic so safety checks reach path and link validation.
+  for (const entry of [{ name: "pax_global_header", content: `52 comment=${archiveCommit}\n`, type: "g" as const }, ...entries]) {
     const content = Buffer.from(entry.content);
     const header = Buffer.alloc(512);
     writeString(header, 0, 100, entry.name);
