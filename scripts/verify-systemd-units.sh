@@ -2,6 +2,8 @@
 set -euo pipefail
 
 fixture="$(mktemp -d)"
+node_binary="$(command -v node)"
+[[ -x "$node_binary" ]] || { printf 'Node executable is unavailable for systemd validation.\n' >&2; exit 1; }
 trap 'rm -rf -- "$fixture"' EXIT
 mkdir -p "$fixture/units" "$fixture/opt/openoverlay/release/apps/backend" "$fixture/opt/openoverlay/release/scripts" "$fixture/var/lib/openoverlay/uploads" \
   "$fixture/var/backups/openoverlay" "$fixture/var/log/openoverlay" "$fixture/run/openoverlay" \
@@ -22,6 +24,7 @@ for unit in apps/backend/systemd/*.service apps/backend/systemd/*.timer; do
     -e "s@/usr/local/libexec/openoverlay@$fixture/usr/local/libexec/openoverlay@g" \
     -e "s@/usr/local/sbin/openoverlay-backup-runner@$fixture/usr/local/libexec/openoverlay/backup-runner@g" \
     -e "s@/etc/openoverlaybackend.env@$fixture/etc/openoverlaybackend.env@g" \
+    -e "s@/usr/bin/node@$node_binary@g" \
     "$unit" > "$fixture/units/$(basename "$unit")"
 done
 
