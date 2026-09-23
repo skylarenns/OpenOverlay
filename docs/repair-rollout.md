@@ -1,44 +1,33 @@
 # Repair rollout
 
-This is the production handoff for the repair branch. The source checkout at `/Users/skylarenns/Desktop/OpenOverlay` remains untouched. As of 2026-09-23, production frontend, gateway, and backend still report `6e45c4c7755b6d4f1ee4e605ecd780999ca7ff8f`. The SSH account is UID 1000 without passwordless sudo. No root unit, backup timer, immutable release, or frontend alias has been changed by this repair.
+## Verified production state, 2026-09-23
 
-## 1. Review and reserve recovery space
+- The original checkout at `/Users/skylarenns/Desktop/OpenOverlay` still has its 41 preexisting entries and was not used for releases. Draft PR #21 contains the repair branch.
+- The stable backup runner is installed under `/usr/local/libexec/openoverlay`. Its daily timer is enabled and active. Snapshots use `/mnt/evenbiggerboi/openoverlay-backups`; the initial snapshot and isolated restore passed. Predeploy snapshots also passed verification. Operator status is `/var/lib/openoverlay/backup-status.json`.
+- The immutable gateway/backend runs epoch-zero release `840f3751fa9994d6423d82eb46924494d46c8e8b` as `skylarenns:openoverlay`, using the existing `/var/lib/openoverlay` database and uploads. Its manifest records schema and reader version 3. The database passed `PRAGMA integrity_check`; no privacy cutover marker exists.
+- Deliberate startup-failure release `1d464bce3fdf49b738d8e2f3132b91fe91ff2867` passed its build and isolated restore, failed gateway startup, and automatically rolled back to `840f375`. The predeploy snapshot `20260923T210015-044Z-predeploy-840f3751fa99` verifies after rollback. This rehearsal branch must never be merged or promoted as an application release.
+- The public frontend remains at `6e45c4c7755b6d4f1ee4e605ecd780999ca7ff8f`. Vercel project `open-overlay-frontend` has `autoAssignCustomDomains=false`, verified through the project API, so a `main` push cannot assign its production custom domain ahead of backend compatibility. Git preview deployment remains enabled.
 
-- Review and merge the repair branch, then require the full Node 24 CI job on the merged commit. Record that 40-character SHA for both backend and frontend releases.
-- On `shhh.skylarenns.com`, verify `/mnt/evenbiggerboi` is mounted and has space. The root filesystem had about 19 GiB free at the last read-only check, below the backup tool's 50 GiB reserve. Use `/mnt/evenbiggerboi/openoverlay-backups` as the backup root.
-- Disable Vercel's automatic production-domain assignment while staging the frontend. The frontend deploy script uses `--skip-domain`, verifies the candidate, and promotes it after the backend is compatible.
+The transient frontend/backend commit mismatch is expected during this infrastructure rehearsal. Do not call the rollout complete until the final production identities agree.
 
-## 2. Install and prove stable backups
+## Complete the application cutover
 
-From the reviewed release source on the host, a root-capable operator runs:
+1. Review and merge PR #21. Require the full clean Node 24 CI suite on the resulting `main` SHA. The local repair branch had a green full CI run at `a1be2502e55766c291bd3c39fdc7ecef717a8c8e`; any later source or documentation commit needs a new run.
+2. Record the exact merged SHA and build a Git archive from it. Verify its SHA-256 and embedded Git commit before copying it to the host. The installed `/usr/local/sbin/openoverlay-deploy` checks both again.
+3. Confirm `openoverlay-deploy status` reports a healthy gateway/child, zero overlay and stage displays, and zero in-flight mutations. The command takes a verified predeploy snapshot and tests an isolated restore before promotion. Deploy the backend archive as root:
 
-```bash
-mountpoint -q /mnt/evenbiggerboi
-OPENOVERLAY_BACKUP_ROOT=/mnt/evenbiggerboi/openoverlay-backups bash scripts/install-backup-runner.sh
-systemctl status openoverlay-backup.timer --no-pager
-```
+   ```bash
+   /usr/local/sbin/openoverlay-deploy deploy "$release_sha" "$archive_sha256" < "$archive_path"
+   ```
 
-The installer copies the backup program to `/usr/local/libexec/openoverlay`, writes the root-owned backup-root configuration, starts one complete snapshot, performs an isolated restore against the running release, and enables the timer only after both pass. The immutable deploy command reads the same configuration for predeploy snapshots, including when invoked through forced SSH without caller environment variables. Inspect `/var/lib/openoverlay/backup-status.json` and the newest snapshot manifest before proceeding.
+4. Verify `/health` and `/_openoverlay/gateway` report the merged SHA and `features.stage`/`features.mutationReceipts`. The first stage release sets `/var/lib/openoverlay/privacy-cutover` before startup. From that point, never restart or roll back to an epoch-zero backend that exposes full church state. If startup fails, recover forward using the verified snapshot and a fixed stage-capable release.
+5. From a clean `main` checkout at the same SHA, use Node 24 and run `VERCEL_TEAM=skylar-enns-projects bash scripts/deploy-frontend-vercel.sh`. It builds a production candidate with `--skip-domain`, checks routes, assets, headers, build identity, and backend compatibility, then promotes it. It records the prior deployment and attempts exact restoration if promotion fails. Keep automatic custom-domain assignment disabled for this controlled workflow.
+6. Require `npm run check:deployments` to report the same SHA for the frontend, gateway, and backend. Test authenticated mutations, public audience HTTP/socket projection, stage-key access and revocation, and OBS-compatible output. Confirm backup timer and operator status again.
 
-## 3. Rehearse immutable activation with the current application
+Physical OBS/projector output, Safari, VoiceOver, phone, tablet, and device checks in [RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md) remain a separate acceptance gate. The browser suites do not prove those hardware results.
 
-A root-capable operator runs `bash scripts/bootstrap-release-host.sh` from the latest reviewed repair source, which includes the full-size archive verifier fix. This installs the immutable candidate unit and deployment entrypoint without replacing the active legacy unit or changing `/var/lib/openoverlay` ownership. The first repair commit changes recovery and deployment tooling without the stage application changes. It passed config, 283 unit/integration tests, and production builds in an isolated checkout. Use that first commit only as the candidate archive:
+## Recovery rules
 
-```bash
-infra_sha=285077d2522cdf1b82dfdb6a147a4d69ed80d4ea
-git archive --format=tar.gz "$infra_sha" > /var/tmp/openoverlay-infra.tar.gz
-infra_sum="$(sha256sum /var/tmp/openoverlay-infra.tar.gz | cut -d' ' -f1)"
-/usr/local/sbin/openoverlay-deploy bootstrap "$infra_sha" "$infra_sum" < /var/tmp/openoverlay-infra.tar.gz
-```
-
-The release manifest derives privacy epoch from the built backend's stage feature, so this baseline release remains at epoch 0. Verify frontend, gateway, backend, uploads, credentials, and runtime UID after activation.
-
-Rehearse a deliberately unhealthy epoch-0 candidate before application changes. Confirm the legacy unit and previous frontend remain reachable after failed startup. The current branch has fixture coverage for failed backend startup and schema-compatible rollback; live activation remains a separate required check.
-
-## 4. Promote compatibility, then the frontend
-
-Build an archive from the reviewed repair commit and use `openoverlay-deploy deploy SHA CHECKSUM` after the gateway reports no active output or stage displays. It takes a verified predeploy snapshot, tests an isolated restore, and checks matching gateway/backend release identity. The first stage-privacy release marks a privacy cutover before startup; if it fails, recover forward from the verified snapshot. Never restart an epoch-0 backend after that marker exists.
-
-Once backend `/health` advertises `features.stage` and `features.mutationReceipts`, run `bash scripts/deploy-frontend-vercel.sh` from the same clean `main` SHA. The script records the previous production deployment ID and build SHA, validates the staged frontend, and attempts an exact rollback with build verification if promotion fails. Confirm `npm run check:deployments` and private stage/public audience output after promotion.
-
-Complete the physical OBS, projector, Safari, VoiceOver, phone, and tablet checks in [RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md). Local browser tests do not establish those results.
+- The current immutable helper discovers the legacy gateway control socket during first activation and uses the immutable control socket afterward. It checks actual output sockets and in-flight mutations rather than treating the gateway's own health connection as an audience display.
+- Every new release must export integer schema and reader versions in its manifest. The helper rejects a missing prior rollback contract before switching an epoch-zero service. It checks schema compatibility again after a failed startup.
+- Verified snapshots and the original legacy unit backup are retained. Restore activation requires the backend to be stopped under the deployment lock; the normal deployment path uses isolated restore verification without touching live data.
