@@ -4,11 +4,11 @@ import { defineConfig, devices } from "@playwright/test";
 
 const frontendDirectory = path.dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = path.resolve(frontendDirectory, "../..");
-const backendPort = readPort("OPENOVERLAY_E2E_BACKEND_PORT", 8734);
+const backendPort = readPort("OPENOVERLAY_E2E_BACKEND_PORT", 18734);
 // Keep the E2E server off Vite's conventional development port. A developer
 // may already have an unrelated app open on 5173, and Playwright's webServer
 // readiness check must never silently attach to that process.
-const frontendPort = readPort("OPENOVERLAY_E2E_FRONTEND_PORT", 5174);
+const frontendPort = readPort("OPENOVERLAY_E2E_FRONTEND_PORT", 15174);
 const backendUrl = process.env.OPENOVERLAY_E2E_BACKEND_URL || `http://127.0.0.1:${backendPort}`;
 const frontendUrl = process.env.OPENOVERLAY_E2E_FRONTEND_URL || `http://127.0.0.1:${frontendPort}`;
 const websocketUrl = process.env.OPENOVERLAY_E2E_WEBSOCKET_URL || backendUrl.replace(/^http/, "ws");
@@ -22,6 +22,7 @@ const backendHealthUrl = new URL("/health", ensureTrailingSlash(backendUrl)).toS
 
 export default defineConfig({
   testDir: "./tests",
+  globalSetup: "./tests/globalSetup.ts",
   timeout: 45_000,
   expect: {
     timeout: 8_000
@@ -35,7 +36,8 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 920 } }
-    }
+    },
+    ...(process.env.OPENOVERLAY_E2E_WEBKIT === "1" ? [{ name: "webkit", use: { ...devices["Desktop Safari"], viewport: { width: 1440, height: 920 } } }] : [])
   ],
   webServer: skipWebServers
     ? undefined

@@ -21,6 +21,7 @@ export interface PresetRow {
   type: PresetType;
   state_json: string;
   action_key_hash: string | null;
+  stage_key: string | null;
   revision: number;
   created_at: string;
   updated_at: string;
@@ -85,10 +86,20 @@ export interface EventLogRow {
   created_at: string;
 }
 
+export interface MutationReceiptRow {
+  owner_user_id: string;
+  resource_id: string;
+  operation: string;
+  idempotency_key: string;
+  request_hash: string;
+  applied_revision: number;
+  expires_at_ms: number;
+}
+
 const MAX_EVENT_LOGS_PER_PRESET = 1_000;
 const MAX_EVENT_PAYLOAD_BYTES = 4 * 1024;
-const CURRENT_SCHEMA_VERSION = 3;
-const CURRENT_READER_VERSION = 3;
+export const CURRENT_SCHEMA_VERSION = 5;
+export const CURRENT_READER_VERSION = 5;
 
 export class Database {
   private readonly db: DatabaseSync;
@@ -189,13 +200,26 @@ export class Database {
       type: input.type,
       state_json: JSON.stringify(input.state),
       action_key_hash: input.actionKeyHash || null,
+      stage_key: makeStageKey(),
       revision: 1,
       created_at: now,
       updated_at: now
     };
     this.run(
-      "INSERT INTO presets (id, public_id, owner_user_id, name, type, state_json, action_key_hash, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      [row.id, row.public_id, row.owner_user_id, row.name, row.type, row.state_json, row.action_key_hash, row.revision, row.created_at, row.updated_at]
+      "INSERT INTO presets (id, public_id, owner_user_id, name, type, state_json, action_key_hash, stage_key, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      [
+        row.id,
+        row.public_id,
+        row.owner_user_id,
+        row.name,
+        row.type,
+        row.state_json,
+        row.action_key_hash,
+        row.stage_key,
+        row.revision,
+        row.created_at,
+        row.updated_at
+      ]
     );
     return row;
   }
@@ -210,6 +234,35 @@ export class Database {
 
   getPresetForUser(id: string, ownerUserId: string): PresetRow | undefined {
     return this.get<PresetRow>("SELECT * FROM presets WHERE id = ? AND owner_user_id = ?", [id, ownerUserId]);
+  }
+
+  setStageKey(id: string, ownerUserId: string, rotate: boolean): PresetRow | undefined {
+    const key = rotate ? makeStageKey() : null;
+    const result = this.run("UPDATE presets SET stage_key = ? WHERE id = ? AND owner_user_id = ?", [key, id, ownerUserId]);
+    return result.changes ? this.getPresetForUser(id, ownerUserId) : undefined;
+  }
+
+  getMutationReceipt(ownerUserId: string, resourceId: string, operation: string, key: string): MutationReceiptRow | undefined {
+    return this.get<MutationReceiptRow>(
+      "SELECT * FROM mutation_receipts WHERE owner_user_id = ? AND resource_id = ? AND operation = ? AND idempotency_key = ? AND expires_at_ms > ?",
+      [ownerUserId, resourceId, operation, key, Date.now()]
+    );
+  }
+
+  recordMutationReceipt(receipt: Omit<MutationReceiptRow, "expires_at_ms">): void {
+    this.run("DELETE FROM mutation_receipts WHERE expires_at_ms <= ?", [Date.now()]);
+    this.run(
+      "INSERT INTO mutation_receipts (owner_user_id, resource_id, operation, idempotency_key, request_hash, applied_revision, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      [
+        receipt.owner_user_id,
+        receipt.resource_id,
+        receipt.operation,
+        receipt.idempotency_key,
+        receipt.request_hash,
+        receipt.applied_revision,
+        Date.now() + 24 * 60 * 60 * 1000
+      ]
+    );
   }
 
   getPresetById(id: string): PresetRow | undefined {
@@ -594,6 +647,8 @@ export class Database {
       if (!applied.has(1)) this.applyInitialSchema();
       if (!applied.has(2)) this.applySessionRevocationSchema();
       if (!applied.has(3)) this.applyExpandedSharingAndMediaSchema();
+      if (!applied.has(4)) this.applyStageSchema();
+      if (!applied.has(5)) this.applyMutationReceiptSchema();
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -745,6 +800,50 @@ export class Database {
     ]);
     this.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [3, now]);
   }
+
+  private applyStageSchema(): void {
+    const columns = new Set(this.all<{ name: string }>("PRAGMA table_info(presets)").map((column) => column.name));
+    if (!columns.has("stage_key")) this.db.exec("ALTER TABLE presets ADD COLUMN stage_key TEXT");
+    for (const row of this.all<{ id: string }>("SELECT id FROM presets WHERE stage_key IS NULL")) {
+      this.run("UPDATE presets SET stage_key = ? WHERE id = ?", [makeStageKey(), row.id]);
+    }
+    const now = new Date().toISOString();
+    this.run("INSERT OR REPLACE INTO schema_compatibility (schema_version, writer_version, min_reader_version, updated_at) VALUES (?, ?, ?, ?)", [
+      4,
+      4,
+      3,
+      now
+    ]);
+    this.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [4, now]);
+  }
+
+  private applyMutationReceiptSchema(): void {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS mutation_receipts (
+        owner_user_id TEXT NOT NULL,
+        resource_id TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        idempotency_key TEXT NOT NULL,
+        request_hash TEXT NOT NULL,
+        applied_revision INTEGER NOT NULL,
+        expires_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (owner_user_id, resource_id, operation, idempotency_key)
+      );
+      CREATE INDEX IF NOT EXISTS idx_mutation_receipts_expiry ON mutation_receipts(expires_at_ms);
+    `);
+    const now = new Date().toISOString();
+    this.run("INSERT OR REPLACE INTO schema_compatibility (schema_version, writer_version, min_reader_version, updated_at) VALUES (?, ?, ?, ?)", [
+      5,
+      5,
+      4,
+      now
+    ]);
+    this.run("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)", [5, now]);
+  }
+}
+
+function makeStageKey(): string {
+  return randomBytes(32).toString("base64url");
 }
 
 export function parsePresetState(row: PresetRow): PresetState {

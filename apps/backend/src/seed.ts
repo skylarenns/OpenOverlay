@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { createDefaultChurchState, createDefaultSoccerState } from "@openoverlay/shared";
 import { hashPassword } from "./auth.js";
 import { loadConfig } from "./config.js";
@@ -20,33 +21,41 @@ try {
     user = db.createUser(email, await hashPassword(password));
   }
 
-  const existing = db.listPresetsForUser(user.id);
-  if (!existing.some((preset) => preset.name === "Demo Soccer")) {
-    const soccer = createDefaultSoccerState("District Championship");
-    const homeLogo = createLogo("OOU", soccer.home.primaryColor, soccer.home.secondaryColor);
-    const awayLogo = createLogo("SKY", soccer.away.primaryColor, soccer.away.secondaryColor);
-    const homeMedia = saveSeedMedia(user.id, "oou-logo.svg", homeLogo);
-    const awayMedia = saveSeedMedia(user.id, "sky-logo.svg", awayLogo);
-    soccer.home.logoMediaId = homeMedia.id;
-    soccer.home.logoUrl = `/api/media/file/${homeMedia.public_id}`;
-    soccer.away.logoMediaId = awayMedia.id;
-    soccer.away.logoUrl = `/api/media/file/${awayMedia.public_id}`;
-    db.createPreset({ ownerUserId: user.id, name: "Demo Soccer", type: "soccer", state: soccer });
-  }
+  const createdPaths: string[] = [];
+  try {
+    db.transaction(() => {
+      const existing = db.listPresetsForUser(user.id);
+      if (!existing.some((preset) => preset.name === "Demo Soccer")) {
+        const soccer = createDefaultSoccerState("District Championship");
+        const homeLogo = createLogo("OOU", soccer.home.primaryColor, soccer.home.secondaryColor);
+        const awayLogo = createLogo("SKY", soccer.away.primaryColor, soccer.away.secondaryColor);
+        const homeMedia = saveSeedMedia(user.id, "oou-logo.svg", homeLogo, createdPaths);
+        const awayMedia = saveSeedMedia(user.id, "sky-logo.svg", awayLogo, createdPaths);
+        soccer.home.logoMediaId = homeMedia.id;
+        soccer.home.logoUrl = `/api/media/file/${homeMedia.public_id}`;
+        soccer.away.logoMediaId = awayMedia.id;
+        soccer.away.logoUrl = `/api/media/file/${awayMedia.public_id}`;
+        db.createPreset({ ownerUserId: user.id, name: "Demo Soccer", type: "soccer", state: soccer });
+      }
 
-  if (!existing.some((preset) => preset.name === "Demo Church")) {
-    const church = createDefaultChurchState("Sunday Service");
-    church.slides.push({
-      id: "demo-message-slide",
-      title: "Message",
-      type: "text",
-      text: "Faith for today\nHope for tomorrow",
-      section: "Message",
-      backgroundColor: "#0f172a",
-      textColor: "#f8fafc",
-      variant: "broadcast"
+      if (!existing.some((preset) => preset.name === "Demo Church")) {
+        const church = createDefaultChurchState("Sunday Service");
+        church.slides.push({
+          id: "demo-message-slide",
+          title: "Message",
+          type: "text",
+          text: "Faith for today\nHope for tomorrow",
+          section: "Message",
+          backgroundColor: "#0f172a",
+          textColor: "#f8fafc",
+          variant: "broadcast"
+        });
+        db.createPreset({ ownerUserId: user.id, name: "Demo Church", type: "church", state: church });
+      }
     });
-    db.createPreset({ ownerUserId: user.id, name: "Demo Church", type: "church", state: church });
+  } catch (error) {
+    for (const filePath of createdPaths) fs.rmSync(filePath, { force: true });
+    throw error;
   }
 
   console.log(`Seed complete for ${email}`);
@@ -54,13 +63,15 @@ try {
   db.close();
 }
 
-function saveSeedMedia(ownerUserId: string, filename: string, contents: string) {
-  const filePath = path.join(config.uploadDir, filename);
+function saveSeedMedia(ownerUserId: string, filename: string, contents: string, createdPaths: string[]) {
+  const storedFilename = `${randomUUID()}-${filename}`;
+  const filePath = path.join(config.uploadDir, storedFilename);
   fs.mkdirSync(config.uploadDir, { recursive: true });
-  fs.writeFileSync(filePath, contents, { mode: 0o640 });
+  fs.writeFileSync(filePath, contents, { mode: 0o640, flag: "wx" });
+  createdPaths.push(filePath);
   return db.createMedia({
     ownerUserId,
-    filename,
+    filename: storedFilename,
     originalFilename: filename,
     mimeType: "image/svg+xml",
     width: 320,

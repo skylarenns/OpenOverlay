@@ -104,6 +104,21 @@ describe("OverlayRenderer", () => {
     intervalSpy.mockRestore();
   });
 
+  it("does not tick an off-air soccer clock", () => {
+    const intervalSpy = vi.spyOn(window, "setInterval");
+    const state = createDefaultSoccerState("Blank Match");
+    state.clock.running = true;
+    state.clock.startedAtMs = Date.now();
+    state.soccerPackage.countdown.running = true;
+    state.soccerPackage.countdown.startedAtMs = Date.now();
+    state.soccerPackage.activeOverlay = null;
+
+    const { unmount } = render(<OverlayRenderer type="soccer" state={state} />);
+    expect(intervalSpy).not.toHaveBeenCalled();
+    unmount();
+    intervalSpy.mockRestore();
+  });
+
   it("does not keep ticking after locally displayed soccer clocks have reached their stop", () => {
     const intervalSpy = vi.spyOn(window, "setInterval");
     const now = Date.now();
@@ -301,6 +316,9 @@ describe("OverlayRenderer", () => {
 
     await waitFor(() => expect(frameBody(container)?.querySelector("[data-bind-score].score-increased")).toBeTruthy());
     expect(frameBody(container)?.querySelectorAll("[data-bind-score].score-increased")).toHaveLength(1);
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(frameBody(container)?.querySelector("[data-bind-score].score-increased")).toBeTruthy();
+    await waitFor(() => expect(frameBody(container)?.querySelector("[data-bind-score].score-increased")).toBeFalsy(), { timeout: 500 });
   });
 
   it("renders a custom countdown label and safely switches to the small layout", async () => {

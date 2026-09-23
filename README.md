@@ -146,6 +146,8 @@ When bumping either version, update backend `/health`, frontend build metadata, 
 
 The live backend runs from the Git checkout on `shhh.skylarenns.com`. Deploy the current GitHub `main` with:
 
+The repair rollout uses the staged [backup and immutable activation procedure](docs/repair-rollout.md). The command below is the current legacy path until that rehearsal succeeds.
+
 ```bash
 npm run deploy:backend
 ```
@@ -250,8 +252,8 @@ CORS errors:
 Cloudflare tunnel down:
 
 ```bash
-sudo systemctl status cloudflared-openoverlay-api
-sudo journalctl -u cloudflared-openoverlay-api --no-pager -n 100
+sudo systemctl status cloudflared-openoverlay.service
+sudo journalctl -u cloudflared-openoverlay.service --no-pager -n 100
 cloudflared tunnel list
 ```
 
@@ -276,7 +278,7 @@ Create a Church production, then use the Service tab:
 1. **Add item** prepares a song, scripture reading, or announcement. Paste text; blank lines start a new slide. Song headings such as `[Verse 1]` and `[Chorus]` label the slides. Choose how many lines fit on each slide and include a reference, translation, or copyright footer.
 2. Arrange **Service order** with the up/down controls. Select thumbnails to preview, then **Show slide** to send the selected slide live. **Next** follows the live slide through the service order. Editing, rearranging, importing, or duplicating slides preserves the published slide until you show another one.
 3. In **Edit slide**, choose a **Worship background**: Aurora, Dusk, Ocean, Geometry, Soft arcs, or Starlight. **Slow** uses gentle motion; **Still** freezes it. **Apply appearance to this item** sets the whole song. Backgrounds also appear in the Add item dialog and travel with service exports. Thumbnails stay still, and reduced-motion preferences stop movement. Use **Upload image** to attach your own image instead.
-4. Open **projector** and **stage screen** windows, move them onto their displays, and press **F** for fullscreen. The stage screen shows current/next text, notes, countdown, and stage messages. The normal output URL remains suitable for an OBS browser source.
+4. Open the public **projector** window and the private **stage screen** from the editor's **Stage display** controls. The stage link carries a revocable capability in its URL fragment; keep it with stage operators. Move the windows onto their displays and press **F** for fullscreen. The stage screen shows current/next text, notes, countdown, and stage messages. The normal output URL remains suitable for an OBS browser source.
 5. Use **Clear text** to keep the background, **Blackout** to show black, or **Hide slide** to remove the slide. These are reversible. **Panic clear** removes all audience graphics. Keyboard shortcuts: Enter shows the preview, Space/Right advances, Left goes back, B toggles blackout, and T toggles text. Shortcuts pause in form fields and dialogs.
 6. **Duplicate** in Service actions reuses the production for next week. **Save item for reuse** or **Export service** downloads a portable JSON file; Import accepts these files or plain text lyrics. Imports append with new IDs and do not replace existing work. Portable files include text, notes, and styling; images remain in the original media library and must be attached again after import.
 

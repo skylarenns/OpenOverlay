@@ -5,6 +5,7 @@ import request from "supertest";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { createBackendApp } from "../app.js";
+import { CURRENT_READER_VERSION, CURRENT_SCHEMA_VERSION } from "../db.js";
 
 describe("persistence", () => {
   it("keeps overlay state after backend restart", async () => {
@@ -19,7 +20,7 @@ describe("persistence", () => {
     };
 
     const first = createBackendApp(config);
-    expect(first.ctx.db.get<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(3);
+    expect(first.ctx.db.get<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(CURRENT_SCHEMA_VERSION);
     const agent = request.agent(first.app);
     await agent.post("/api/auth/signup").send({ email: "persist@example.com", password: "password123" }).expect(201);
     const created = await agent.post("/api/presets").send({ name: "Persistent Match", type: "soccer" }).expect(201);
@@ -49,7 +50,7 @@ describe("persistence", () => {
     const first = createBackendApp(config);
     first.close();
     const database = new DatabaseSync(config.databasePath);
-    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(4, new Date().toISOString());
+    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(CURRENT_SCHEMA_VERSION + 1, new Date().toISOString());
     database.close();
 
     try {
@@ -72,8 +73,10 @@ describe("persistence", () => {
     const first = createBackendApp(config);
     first.close();
     const database = new DatabaseSync(config.databasePath);
-    database.prepare("INSERT INTO schema_compatibility VALUES (?, ?, ?, ?)").run(4, 4, 3, new Date().toISOString());
-    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(4, new Date().toISOString());
+    database
+      .prepare("INSERT INTO schema_compatibility VALUES (?, ?, ?, ?)")
+      .run(CURRENT_SCHEMA_VERSION + 1, CURRENT_SCHEMA_VERSION + 1, CURRENT_READER_VERSION, new Date().toISOString());
+    database.prepare("INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)").run(CURRENT_SCHEMA_VERSION + 1, new Date().toISOString());
     database.close();
 
     const compatible = createBackendApp(config);
@@ -107,7 +110,7 @@ describe("persistence", () => {
 
     const migrated = createBackendApp(config);
     try {
-      expect(migrated.ctx.db.get<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(3);
+      expect(migrated.ctx.db.get<{ version: number }>("SELECT MAX(version) AS version FROM schema_migrations")?.version).toBe(CURRENT_SCHEMA_VERSION);
       expect(migrated.ctx.db.findUserById(signup.body.user.id)?.session_version).toBe(1);
     } finally {
       migrated.close();

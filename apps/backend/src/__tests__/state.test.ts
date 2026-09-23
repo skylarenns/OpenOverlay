@@ -1,8 +1,109 @@
 import { describe, expect, it } from "vitest";
-import { createDefaultChurchState, createDefaultSoccerState, computeClockSeconds, normalizeSoccerState, parseRoster } from "@openoverlay/shared";
-import { PresetActionValidationError, applyAction, isSoccerState, materializeState, ensurePresetState, validatePresetState } from "../state.js";
+import {
+  MAX_PRESET_STATE_BYTES,
+  MAX_SERVICE_FILE_BYTES,
+  createDefaultChurchState,
+  createDefaultSoccerState,
+  computeClockSeconds,
+  exportChurchService,
+  importChurchService,
+  normalizeSoccerState,
+  parseRoster
+} from "@openoverlay/shared";
+import {
+  PresetActionValidationError,
+  applyAction,
+  isSoccerState,
+  materializeState,
+  ensurePresetState,
+  publicOverlayState,
+  readStoredPresetState,
+  validatePresetState
+} from "../state.js";
 
 describe("backend state actions", () => {
+  it("uses the canonical UTF-8 budget and keeps accepted services portable", () => {
+    const base = createDefaultChurchState("Budget");
+    const slide = base.slides[0];
+    const make = (characters: number) => ({
+      ...base,
+      slides: Array.from({ length: 100 }, (_, index) => ({ ...slide, id: `slide-${index}`, text: "界".repeat(characters) }))
+    });
+    let accepted = 0;
+    let rejected = 2000;
+    while (accepted + 1 < rejected) {
+      const middle = Math.floor((accepted + rejected) / 2);
+      try {
+        validatePresetState("church", "Budget", make(middle));
+        accepted = middle;
+      } catch {
+        rejected = middle;
+      }
+    }
+    const state = validatePresetState("church", "Budget", make(accepted)) as typeof base;
+    expect(Buffer.byteLength(JSON.stringify(state), "utf8")).toBeLessThanOrEqual(MAX_PRESET_STATE_BYTES);
+    expect(() => validatePresetState("church", "Budget", make(rejected))).toThrow(/too large/i);
+    const exported = exportChurchService(state);
+    expect(Buffer.byteLength(exported, "utf8")).toBeLessThanOrEqual(MAX_SERVICE_FILE_BYTES);
+    expect(importChurchService(exported).slides).toHaveLength(100);
+  });
+  it("recovers corrupt records off-air while retaining the damaged source", () => {
+    for (const type of ["soccer", "church"] as const) {
+      const row = { type, name: "Damaged", state_json: "{" };
+      const result = readStoredPresetState(row);
+      expect(result.recovered).toBe(true);
+      expect(result.state.activeGraphics).toEqual([]);
+      expect(row.state_json).toBe("{");
+      if (isSoccerState(result.state)) {
+        expect(result.state.soccerPackage.activeOverlay).toBeNull();
+        expect(Object.values(result.state.elements).every((element) => !element.visible)).toBe(true);
+      } else if ("slides" in result.state) {
+        expect(result.state.elements.fullscreenSlide.visible).toBe(false);
+        expect(result.state.onAirSlide).toBeNull();
+      }
+    }
+  });
+
+  it("projects only the displayed church slide to the public audience", () => {
+    const state = createDefaultChurchState("Secret preparation");
+    state.sections = ["Private section", "Live section"];
+    state.stageMessage = "Private stage cue";
+    state.slides = [
+      { ...state.slides[0], id: "draft", section: "Private section", text: "Unpublished", notes: "Private notes" },
+      { ...state.slides[0], id: "live", section: "Live section", text: "Published", notes: "Live notes", mediaId: "private-internal-id" }
+    ];
+    state.selectedSlideId = "draft";
+    state.onAirSlide = structuredClone(state.slides[1]);
+    state.elements.fullscreenSlide.visible = true;
+    (state.slides[1] as (typeof state.slides)[number] & { futurePrivate?: string }).futurePrivate = "Nested private slide data";
+    (state.onAirSlide as (typeof state.slides)[number] & { futurePrivate?: string }).futurePrivate = "Nested private published data";
+    (state.style as typeof state.style & { futurePrivate?: string }).futurePrivate = "Nested private style data";
+    state.activeGraphics.push({
+      id: "cue",
+      kind: "church-lower-third",
+      title: "Published lower third",
+      variant: "clean",
+      placement: state.elements.lowerThird.placement,
+      startedAtMs: 1000,
+      durationMs: 0,
+      expiresAtMs: null,
+      payload: { privateCue: "Nested private graphic data" }
+    });
+    const projected = publicOverlayState(state);
+    expect(JSON.stringify(projected)).not.toMatch(
+      /Secret preparation|Private section|Private stage cue|Unpublished|Private notes|Live notes|private-internal-id|Nested private/
+    );
+    expect("slides" in projected && projected.slides).toHaveLength(1);
+    expect("slides" in projected ? projected.slides[0]?.text : null).toBe("Published");
+    expect(state.slides).toHaveLength(2);
+
+    const legacy = { ...state, onAirSlide: undefined, selectedSlideId: "live" };
+    const legacyProjection = publicOverlayState(legacy);
+    expect("slides" in legacyProjection ? legacyProjection.slides : []).toHaveLength(1);
+    state.elements.fullscreenSlide.visible = false;
+    const offAirProjection = publicOverlayState(state);
+    expect("slides" in offAirProjection ? offAirProjection.slides : []).toHaveLength(0);
+  });
   it("creates blank off-air productions without changing legacy saved defaults", () => {
     const soccer = ensurePresetState("soccer", "New game") as ReturnType<typeof createDefaultSoccerState>;
     expect(soccer.soccerPackage.activeOverlay).toBeNull();
@@ -47,6 +148,17 @@ describe("backend state actions", () => {
     for (const durationSeconds of [0, -1, 1.5, 3601, "600", null]) {
       expect(() => applyAction(state, "countdown-start", { durationSeconds }, 123_000)).toThrow(PresetActionValidationError);
     }
+  });
+
+  it("rejects running timers without start timestamps", () => {
+    const state = createDefaultSoccerState("Invalid timer");
+    state.clock.running = true;
+    state.clock.startedAtMs = null;
+    expect(() => validatePresetState("soccer", "Invalid timer", state)).toThrow(/start timestamp/);
+    state.clock.running = false;
+    state.soccerPackage.countdown.running = true;
+    state.soccerPackage.countdown.startedAtMs = null;
+    expect(() => validatePresetState("soccer", "Invalid timer", state)).toThrow(/start timestamp/);
   });
 
   it("updates scores through action endpoints logic", () => {

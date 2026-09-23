@@ -287,6 +287,7 @@ export interface CustomState {
 }
 
 export type PresetState = SoccerState | ChurchState | CustomState;
+export const MAX_PRESET_STATE_BYTES = 512 * 1024;
 
 export interface PresetSummary {
   /** Server time when this snapshot was produced; older servers may omit it. */
@@ -709,7 +710,7 @@ export function churchOnAirSlide(state: ChurchState): ChurchSlide | null {
   return state.onAirSlide === undefined ? (state.slides.find((slide) => slide.id === state.selectedSlideId) ?? state.slides[0] ?? null) : state.onAirSlide;
 }
 
-export { churchSections, orderedChurchSlides, prepareChurchSlides, importChurchService, exportChurchService } from "./church.js";
+export { churchSections, orderedChurchSlides, prepareChurchSlides, importChurchService, exportChurchService, MAX_SERVICE_FILE_BYTES } from "./church.js";
 
 function isSoccerLabOverlay(value: unknown): value is SoccerLabOverlay {
   return (

@@ -2,11 +2,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
 
 const repositoryRoot = path.resolve(import.meta.dirname, "../../../..");
 const deployHelper = path.join(repositoryRoot, "scripts/openoverlay-deploy");
+const archiveCommit = "a".repeat(40);
 const directories: string[] = [];
 
 afterEach(() => {
@@ -14,6 +16,10 @@ afterEach(() => {
 });
 
 describe("release archive validation", () => {
+  it("reads Git identity from a release larger than the pipe buffer", () => {
+    expect(validateArchive([{ name: "large.txt", content: randomBytes(256 * 1024).toString("base64") }]).status).toBe(0);
+  });
+
   it("accepts bounded regular files and rejects traversal and links", () => {
     expect(validateArchive([{ name: "package.json", content: "{}" }]).status).toBe(0);
 
@@ -32,7 +38,7 @@ function validateArchive(entries: TarEntry[]) {
   directories.push(directory);
   const archive = path.join(directory, "release.tar.gz");
   fs.writeFileSync(archive, gzipSync(createTar(entries)));
-  return spawnSync("bash", ["-c", 'source "$1"; verify_archive "$2"', "verify", deployHelper, archive], {
+  return spawnSync("bash", [deployHelper, "verify-archive", archive, archiveCommit], {
     cwd: repositoryRoot,
     encoding: "utf8",
     env: { ...process.env, OPENOVERLAY_DEPLOY_LIBRARY_ONLY: "1" }
@@ -42,12 +48,14 @@ function validateArchive(entries: TarEntry[]) {
 interface TarEntry {
   name: string;
   content: string;
-  type?: "0" | "2";
+  type?: "0" | "2" | "g";
 }
 
 function createTar(entries: TarEntry[]): Buffer {
   const blocks: Buffer[] = [];
-  for (const entry of entries) {
+  // Git archives carry the commit in a global PAX comment. Keep the test
+  // archive realistic so safety checks reach path and link validation.
+  for (const entry of [{ name: "pax_global_header", content: `52 comment=${archiveCommit}\n`, type: "g" as const }, ...entries]) {
     const content = Buffer.from(entry.content);
     const header = Buffer.alloc(512);
     writeString(header, 0, 100, entry.name);

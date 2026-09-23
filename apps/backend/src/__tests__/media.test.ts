@@ -88,6 +88,25 @@ describe("media upload safety", () => {
     expect(response.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
   });
 
+  it("parses long SVG comment preambles and rejects an unfinished comment", async () => {
+    await signup(server.agent, "svg-preamble@example.com");
+    const preamble = `<?xml version="1.0"?>\n${"<!-- prepared -->\n".repeat(2_000)}`;
+    await server.agent
+      .post("/api/media")
+      .attach("file", Buffer.from(`${preamble}<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"></svg>`), {
+        filename: "preamble.svg",
+        contentType: "image/svg+xml"
+      })
+      .expect(201);
+    await server.agent
+      .post("/api/media")
+      .attach("file", Buffer.from(`${preamble}<!-- unfinished <svg xmlns="http://www.w3.org/2000/svg"></svg>`), {
+        filename: "unfinished.svg",
+        contentType: "image/svg+xml"
+      })
+      .expect(400);
+  });
+
   it("rejects mismatched and unrecognized image signatures", async () => {
     await signup(server.agent, "signature@example.com");
     await server.agent.post("/api/media").attach("file", onePixelPng(), { filename: "fake.jpg", contentType: "image/jpeg" }).expect(400);

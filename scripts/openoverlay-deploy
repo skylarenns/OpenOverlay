@@ -5,10 +5,32 @@ readonly RELEASE_ROOT="${OPENOVERLAY_RELEASE_ROOT:-/opt/openoverlay}"
 readonly RELEASES_DIR="${RELEASE_ROOT}/releases"
 readonly CURRENT_LINK="${RELEASE_ROOT}/current"
 readonly PREVIOUS_LINK="${RELEASE_ROOT}/previous"
-readonly BACKUP_ROOT="${OPENOVERLAY_BACKUP_ROOT:-/var/backups/openoverlay}"
-readonly CONTROL_SOCKET="${OPENOVERLAY_CONTROL_SOCKET:-/run/openoverlay/gateway-control.sock}"
+readonly BACKUP_CONFIG_FILE="${OPENOVERLAY_BACKUP_CONFIG_FILE:-/etc/openoverlay-backup.env}"
+configured_backup_root=""
+if [[ -f "$BACKUP_CONFIG_FILE" ]]; then
+  configured_backup_root="$(sed -n 's/^OPENOVERLAY_BACKUP_ROOT=//p' "$BACKUP_CONFIG_FILE" | tail -n 1)"
+fi
+readonly BACKUP_ROOT="${OPENOVERLAY_BACKUP_ROOT:-${configured_backup_root:-/var/backups/openoverlay}}"
+readonly BACKUP_SCRIPT="${OPENOVERLAY_BACKUP_SCRIPT:-/usr/local/libexec/openoverlay/openoverlay-backup.mjs}"
+readonly IMMUTABLE_CONTROL_SOCKET="/run/openoverlay/gateway-control.sock"
+readonly LEGACY_CONTROL_SOCKET="${OPENOVERLAY_LEGACY_CONTROL_SOCKET:-/run/user/$(id -u skylarenns 2>/dev/null || printf 1000)/openoverlay/gateway-control.sock}"
+select_control_socket() {
+  if [[ -S "$IMMUTABLE_CONTROL_SOCKET" ]]; then
+    printf '%s' "$IMMUTABLE_CONTROL_SOCKET"
+  elif [[ ! -L "$RELEASE_ROOT/current" && -S "$LEGACY_CONTROL_SOCKET" ]]; then
+    printf '%s' "$LEGACY_CONTROL_SOCKET"
+  else
+    printf '%s' "$IMMUTABLE_CONTROL_SOCKET"
+  fi
+}
+readonly CONTROL_SOCKET="${OPENOVERLAY_CONTROL_SOCKET:-$(select_control_socket)}"
 readonly LOCK_FILE="${OPENOVERLAY_LOCK_FILE:-/run/lock/openoverlay-deploy.lock}"
 readonly SERVICE_NAME="${OPENOVERLAY_SERVICE_NAME:-Openoverlaybackend.service}"
+readonly DATABASE_PATH="${OPENOVERLAY_DATABASE_PATH:-/var/lib/openoverlay/openoverlay.sqlite}"
+readonly PRIVACY_CUTOVER_MARKER="${OPENOVERLAY_PRIVACY_CUTOVER_MARKER:-/var/lib/openoverlay/privacy-cutover}"
+readonly NODE_BIN="${OPENOVERLAY_NODE_BIN:-/usr/bin/node}"
+readonly IMMUTABLE_UNIT="${OPENOVERLAY_IMMUTABLE_UNIT:-/etc/openoverlay/Openoverlaybackend.immutable.service}"
+readonly ACTIVE_UNIT="${OPENOVERLAY_ACTIVE_UNIT:-/etc/systemd/system/Openoverlaybackend.service}"
 readonly MAX_ARCHIVE_BYTES=268435456
 readonly RETAIN_RELEASES=5
 
@@ -16,6 +38,9 @@ fail() {
   printf 'openoverlay-deploy: %s\n' "$*" >&2
   exit 1
 }
+
+[[ "$BACKUP_ROOT" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "backup root must be an absolute plain path"
+[[ "$BACKUP_SCRIPT" =~ ^/[A-Za-z0-9._/-]+$ ]] || fail "backup script must be an absolute plain path"
 
 validate_sha() {
   [[ "$1" =~ ^[0-9a-f]{40}$ ]] || fail "release SHA must be 40 lowercase hexadecimal characters"
@@ -67,8 +92,8 @@ assert_promotion_safe() {
       console.error("deployment deferred: mutating HTTP request is in flight");
       process.exit(75);
     }
-    if (Number(state.connections?.overlay) > 0 && process.env.FORCE_OVERLAY !== "true") {
-      console.error("deployment deferred: a real overlay/OBS client is connected");
+    if ((Number(state.connections?.overlay) > 0 || Number(state.connections?.stage) > 0) && process.env.FORCE_OVERLAY !== "true") {
+      console.error("deployment deferred: an output or stage display is connected");
       process.exit(75);
     }
   ' || return $?
@@ -94,13 +119,22 @@ receive_archive() {
 }
 
 verify_archive() {
-  local archive="$1" count=0 entry
+  local archive="$1" expected_sha="$2" count=0 entry archive_sha
+  # git get-tar-commit-id reads only the PAX header. Drain the rest so gzip
+  # finishes normally under pipefail for real release-sized archives.
+  archive_sha="$(gzip -dc "$archive" | { git get-tar-commit-id || exit 1; cat >/dev/null; })" || fail "archive lacks a Git commit identity"
+  [[ "$archive_sha" == "$expected_sha" ]] || fail "archive Git commit does not match the requested release SHA"
   while IFS= read -r entry; do
     count=$((count + 1))
     (( count <= 20000 )) || fail "release archive contains too many entries"
     [[ -n "$entry" && "$entry" != /* && "$entry" != *$'\n'* && "$entry" != *$'\r'* ]] || fail "archive contains an unsafe path"
     [[ "/$entry/" != *"/../"* && "/$entry/" != *"/./"* ]] || fail "archive contains path traversal"
-    [[ "$entry" != .git/* && "$entry" != */.git/* && "$entry" != .env* && "$entry" != */.env* ]] || fail "archive contains forbidden state or secret files"
+    [[ "$entry" != .git/* && "$entry" != */.git/* ]] || fail "archive contains forbidden Git state"
+    case "$entry" in
+      .env|*/.env|.env.*|*/.env.*)
+        [[ "$entry" == .env.example || "$entry" == */.env.example ]] || fail "archive contains secret environment files"
+        ;;
+    esac
     [[ "$entry" != node_modules/* && "$entry" != */node_modules/* && "$entry" != data/* && "$entry" != */data/* ]] || fail "archive contains mutable runtime contents"
   done < <(tar -tzf "$archive")
   (( count > 0 )) || fail "release archive contains no entries"
@@ -128,15 +162,24 @@ build_release() {
     /usr/bin/npm run build
     /usr/bin/node scripts/validate-production-env.mjs /etc/openoverlaybackend.env 8734
   )
-  RELEASE_SHA="$sha" ARCHIVE_SHA256="$archive_checksum" RELEASE_PATH="$staging" /usr/bin/node -e '
-    const fs = require("node:fs");
-    const path = require("node:path");
+  RELEASE_SHA="$sha" ARCHIVE_SHA256="$archive_checksum" RELEASE_PATH="$staging" "$NODE_BIN" --input-type=module -e '
+    import fs from "node:fs";
+    import path from "node:path";
+    import { pathToFileURL } from "node:url";
+    const backend = await import(pathToFileURL(path.join(process.env.RELEASE_PATH, "apps/backend/dist/db.js")).href);
+    const shared = await import(pathToFileURL(path.join(process.env.RELEASE_PATH, "packages/shared/dist/compatibility.js")).href);
+    if (!Number.isSafeInteger(backend.CURRENT_SCHEMA_VERSION) || !Number.isSafeInteger(backend.CURRENT_READER_VERSION)) {
+      throw new Error("release backend does not export its schema reader contract");
+    }
     const manifest = {
       formatVersion: 1,
       releaseSha: process.env.RELEASE_SHA,
       archiveSha256: process.env.ARCHIVE_SHA256,
       createdAt: new Date().toISOString(),
-      backendEntrypoint: "apps/backend/dist/gateway.js"
+      backendEntrypoint: "apps/backend/dist/gateway.js",
+      schemaVersion: backend.CURRENT_SCHEMA_VERSION,
+      readerVersion: backend.CURRENT_READER_VERSION,
+      privacyEpoch: shared.openOverlayCompatibility().features?.stage === true ? 1 : 0
     };
     fs.writeFileSync(path.join(process.env.RELEASE_PATH, "release-manifest.json"), JSON.stringify(manifest, null, 2) + "\n", { mode: 0o644 });
   '
@@ -148,8 +191,9 @@ build_release() {
 }
 
 snapshot_for_release() {
-  local active_sha="$1" release="$2" output
-  output="$(/usr/bin/node "$release/scripts/openoverlay-backup.mjs" create \
+  local active_sha="$1" output
+  [[ -f "$BACKUP_SCRIPT" ]] || fail "verified stable backup script is missing"
+  output="$("$NODE_BIN" "$BACKUP_SCRIPT" create \
     --kind predeploy \
     --root "$BACKUP_ROOT" \
     --database /var/lib/openoverlay/openoverlay.sqlite \
@@ -160,12 +204,15 @@ snapshot_for_release() {
 
 wait_for_release() {
   local sha="$1" attempt
-  for ((attempt = 1; attempt <= 30; attempt++)); do
+  for ((attempt = 1; attempt <= ${OPENOVERLAY_HEALTH_ATTEMPTS:-30}; attempt++)); do
     if HEALTH_JSON="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/health 2>/dev/null)" \
       GATEWAY_JSON="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/_openoverlay/gateway 2>/dev/null)" \
       EXPECTED_SHA="$sha" /usr/bin/node -e '
-        const health=JSON.parse(process.env.HEALTH_JSON);
-        const gateway=JSON.parse(process.env.GATEWAY_JSON);
+        let health, gateway;
+        try {
+          health=JSON.parse(process.env.HEALTH_JSON);
+          gateway=JSON.parse(process.env.GATEWAY_JSON);
+        } catch { process.exit(1); }
         const sha=process.env.EXPECTED_SHA;
         process.exit(health.ok === true && health.build?.commit === sha && gateway.ok === true && gateway.gatewayBuild?.commit === sha && gateway.activeBuild?.commit === sha ? 0 : 1);
       '; then
@@ -176,21 +223,77 @@ wait_for_release() {
   return 1
 }
 
+assert_rollback_compatible() {
+  local previous="$1"
+  [[ -f "$previous/release-manifest.json" ]] || fail "previous release lacks a compatibility manifest"
+  # The single-quoted Node program contains JavaScript template expressions.
+  # shellcheck disable=SC2016
+  PREVIOUS_MANIFEST="$previous/release-manifest.json" DB_PATH="$DATABASE_PATH" PRIVACY_MARKER="$PRIVACY_CUTOVER_MARKER" "$NODE_BIN" -e '
+    const fs = require("node:fs");
+    const { DatabaseSync } = require("node:sqlite");
+    const manifest = JSON.parse(fs.readFileSync(process.env.PREVIOUS_MANIFEST, "utf8"));
+    if (fs.existsSync(process.env.PRIVACY_MARKER) && Number(manifest.privacyEpoch || 0) < 1) {
+      console.error("privacy cutover forbids rollback to a backend that exposes stage content");
+      process.exit(1);
+    }
+    if (!Number.isSafeInteger(manifest.schemaVersion) || !Number.isSafeInteger(manifest.readerVersion)) {
+      console.error("previous release has no schema reader contract");
+      process.exit(1);
+    }
+    const db = new DatabaseSync(process.env.DB_PATH, { readOnly: true });
+    const schema = Number(db.prepare("SELECT COALESCE(MAX(version), 0) AS version FROM schema_migrations").get().version);
+    const row = db.prepare("SELECT name FROM sqlite_master WHERE type = \x27table\x27 AND name = \x27schema_compatibility\x27").get();
+    const minimum = row ? db.prepare("SELECT min_reader_version FROM schema_compatibility WHERE schema_version = ?").get(schema)?.min_reader_version : undefined;
+    db.close();
+    if (schema > manifest.schemaVersion && !(Number.isSafeInteger(minimum) && minimum <= manifest.readerVersion)) {
+      console.error(`schema ${schema} cannot be read by previous release ${manifest.readerVersion}`);
+      process.exit(1);
+    }
+  ' || fail "previous release is not eligible for rollback"
+}
+
 promote_release() {
   local sha="$1" release="$2" old_current=""
   if [[ -L "$CURRENT_LINK" ]]; then old_current="$(readlink -f "$CURRENT_LINK")"; fi
+  local new_privacy old_privacy=0
+  new_privacy="$(RELEASE_MANIFEST="$release/release-manifest.json" "$NODE_BIN" -e 'process.stdout.write(String(require(process.env.RELEASE_MANIFEST).privacyEpoch || 0))')"
+  if [[ -n "$old_current" && -f "$old_current/release-manifest.json" ]]; then
+    old_privacy="$(RELEASE_MANIFEST="$old_current/release-manifest.json" "$NODE_BIN" -e 'process.stdout.write(String(require(process.env.RELEASE_MANIFEST).privacyEpoch || 0))')"
+  fi
+  if [[ -n "$old_current" ]] && ! (( new_privacy >= 1 && old_privacy < 1 )); then
+    assert_rollback_compatible "$old_current"
+  fi
+  if (( new_privacy >= 1 && old_privacy < 1 )); then
+    systemctl stop "$SERVICE_NAME" || fail "could not stop privacy-incompatible backend before cutover"
+    install -m 0640 -o skylarenns -g openoverlay /dev/null "$PRIVACY_CUTOVER_MARKER"
+  fi
   if [[ -n "$old_current" ]]; then atomic_link "$old_current" "$PREVIOUS_LINK"; fi
   atomic_link "$release" "$CURRENT_LINK"
-  systemctl restart "$SERVICE_NAME"
-  if wait_for_release "$sha"; then return 0; fi
+  if systemctl restart "$SERVICE_NAME" && wait_for_release "$sha"; then return 0; fi
   if [[ -n "$old_current" ]]; then
+    assert_rollback_compatible "$old_current"
     atomic_link "$old_current" "$CURRENT_LINK"
-    systemctl restart "$SERVICE_NAME"
+    systemctl restart "$SERVICE_NAME" || { printf 'new release failed and previous service could not restart\n' >&2; return 1; }
     local previous_sha
     previous_sha="$(basename "$old_current")"
-    wait_for_release "$previous_sha" || fail "new release failed and automatic backend rollback did not recover"
+    wait_for_release "$previous_sha" || { printf 'new release failed and automatic backend rollback did not recover\n' >&2; return 1; }
+    printf 'new release failed post-promotion health and was rolled back\n' >&2
+    return 1
   fi
-  fail "new release failed post-promotion health and was rolled back"
+  printf 'new release failed post-promotion health with no previous release\n' >&2
+  return 1
+}
+
+wait_for_legacy() {
+  local sha="$1" attempt
+  for ((attempt = 1; attempt <= ${OPENOVERLAY_HEALTH_ATTEMPTS:-30}; attempt++)); do
+    if HEALTH_JSON="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/health 2>/dev/null)" EXPECTED_SHA="$sha" "$NODE_BIN" -e '
+      const health=JSON.parse(process.env.HEALTH_JSON);
+      process.exit(health.ok === true && health.build?.commit === process.env.EXPECTED_SHA ? 0 : 1);
+    '; then return 0; fi
+    sleep 1
+  done
+  return 1
 }
 
 prune_releases() {
@@ -221,7 +324,7 @@ deploy_release() {
   receive_archive "$archive"
   actual_checksum="$(sha256sum "$archive" | awk '{print $1}')"
   [[ "$actual_checksum" == "$checksum" ]] || fail "archive checksum mismatch"
-  verify_archive "$archive"
+  verify_archive "$archive" "$sha"
 
   if [[ -d "$release" ]]; then
     RELEASE="$release" SHA="$sha" CHECKSUM="$checksum" /usr/bin/node -e '
@@ -240,10 +343,29 @@ deploy_release() {
     active_sha="$(curl -fsS --connect-timeout 2 --max-time 5 http://127.0.0.1:8734/health | /usr/bin/node -e 'let b=""; process.stdin.on("data",c=>b+=c); process.stdin.on("end",()=>process.stdout.write(JSON.parse(b).build?.commit || ""))')"
   fi
   validate_sha "$active_sha"
-  snapshot="$(snapshot_for_release "$active_sha" "$release")"
-  /usr/bin/node "$release/scripts/openoverlay-backup.mjs" restore-verify --snapshot "$snapshot" --release "$release"
-  if [[ "$bootstrap" == "true" ]]; then assert_bootstrap_safe; else assert_promotion_safe "$force_overlay"; fi
-  promote_release "$sha" "$release"
+  snapshot="$(snapshot_for_release "$active_sha")"
+  "$NODE_BIN" "$BACKUP_SCRIPT" restore-verify --snapshot "$snapshot" --release "$release"
+  local legacy_unit_backup=""
+  if [[ "$bootstrap" == "true" ]]; then
+    assert_bootstrap_safe
+    [[ -f "$IMMUTABLE_UNIT" && -f "$ACTIVE_UNIT" ]] || fail "immutable candidate or active legacy unit is missing"
+    legacy_unit_backup="${ACTIVE_UNIT}.before-immutable-$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -- "$ACTIVE_UNIT" "$legacy_unit_backup"
+    install -m 0644 -o root -g root "$IMMUTABLE_UNIT" "$ACTIVE_UNIT"
+    systemctl daemon-reload
+  else
+    assert_promotion_safe "$force_overlay"
+  fi
+  if ! promote_release "$sha" "$release"; then
+    if [[ -n "$legacy_unit_backup" && ! -f "$PRIVACY_CUTOVER_MARKER" ]]; then
+      install -m 0644 -o root -g root "$legacy_unit_backup" "$ACTIVE_UNIT"
+      systemctl daemon-reload
+      rm -f -- "$CURRENT_LINK"
+      systemctl restart "$SERVICE_NAME" || fail "bootstrap failed and legacy service could not restart"
+      wait_for_legacy "$active_sha" || fail "bootstrap failed and legacy backend did not recover"
+    fi
+    fail "release activation failed; prior service restored where eligible"
+  fi
   prune_releases
   printf '{"ok":true,"releaseSha":"%s","snapshot":"%s"}\n' "$sha" "$snapshot"
 }
@@ -256,10 +378,16 @@ rollback_release() {
   previous="$(readlink -f "$PREVIOUS_LINK")"
   previous_sha="$(basename "$previous")"
   validate_sha "$previous_sha"
+  assert_rollback_compatible "$previous"
   atomic_link "$previous" "$CURRENT_LINK"
   atomic_link "$current" "$PREVIOUS_LINK"
-  systemctl restart "$SERVICE_NAME"
-  wait_for_release "$previous_sha" || fail "rollback release failed health verification"
+  if ! systemctl restart "$SERVICE_NAME" || ! wait_for_release "$previous_sha"; then
+    atomic_link "$current" "$CURRENT_LINK"
+    atomic_link "$previous" "$PREVIOUS_LINK"
+    systemctl restart "$SERVICE_NAME" || fail "rollback failed and original release could not restart"
+    wait_for_release "$(basename "$current")" || fail "rollback failed and original release did not recover"
+    fail "rollback attempt failed; original release restored"
+  fi
   printf '{"ok":true,"releaseSha":"%s","rolledBackFrom":"%s"}\n' "$previous_sha" "$(basename "$current")"
 }
 
@@ -296,7 +424,12 @@ run_command() {
   esac
 }
 
-if [[ "${OPENOVERLAY_DEPLOY_LIBRARY_ONLY:-}" != "1" ]]; then
+if [[ "${OPENOVERLAY_DEPLOY_LIBRARY_ONLY:-}" == "1" ]]; then
+  if [[ "${1:-}" == "verify-archive" ]]; then
+    [[ $# -eq 3 ]] || fail "usage: verify-archive PATH SHA"
+    verify_archive "$2" "$3"
+  fi
+else
   require_root
   install -d -m 0750 -o root -g openoverlay "$RELEASE_ROOT" "$RELEASES_DIR"
   install -d -m 0700 -o root -g root "$BACKUP_ROOT"

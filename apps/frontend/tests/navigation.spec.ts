@@ -1,13 +1,13 @@
 import { expect, test, request, type Page, type Route } from "@playwright/test";
-import { ensureServiceAccount, serviceAccount as navigationAccount } from "./serviceAccount";
+import { serviceAccount } from "./serviceAccount";
 
-const backend = process.env.OPENOVERLAY_E2E_BACKEND_URL || `http://127.0.0.1:${Number(process.env.OPENOVERLAY_E2E_BACKEND_PORT) || 8734}`;
+const backend = process.env.OPENOVERLAY_E2E_BACKEND_URL || `http://127.0.0.1:${Number(process.env.OPENOVERLAY_E2E_BACKEND_PORT) || 18734}`;
 const headers = { "X-OpenOverlay-Api-Version": "v1" };
+const navigationAccount = serviceAccount("navigation");
 
 const games: Array<{ id: string; name: string; type: string }> = [];
 
 test.beforeAll(async () => {
-  await ensureServiceAccount();
   const api = await request.newContext();
   try {
     const login = await api.post(`${backend}/api/v1/auth/login`, { headers, data: navigationAccount });
@@ -77,12 +77,12 @@ test("sidebar lazily loads destinations and restores visited pages during backgr
     await expect(main.getByRole("status", { name: status, exact: true })).toHaveCount(0);
   }
 
-  // Games has already loaded: cached cards must remain usable while HTTP waits.
-  const releaseGames = await hold(page, /\/api\/v1\/presets(?:\?.*)?$/);
-  await nav.getByRole("link", { name: "Games", exact: true }).click();
+  // Productions has already loaded: cached cards must remain usable while HTTP waits.
+  const releaseProductions = await hold(page, /\/api\/v1\/presets(?:\?.*)?$/);
+  await nav.getByRole("link", { name: "Productions", exact: true }).click();
   await expect(main.getByRole("link", { name: "Open Soccer", exact: true })).toBeVisible();
   await expect(main.getByRole("status", { name: "Loading games" })).toHaveCount(0);
-  releaseGames();
+  releaseProductions();
 
   for (const game of games) {
     const releaseHttp = await hold(page, new RegExp(`/api/v1/presets/${game.id}(?:\\?.*)?$`));
@@ -140,10 +140,17 @@ test("sidebar supports dark mode, narrow screens, keyboard collapse, and reduced
 
   for (const width of [1024, 768, 390, 280]) {
     await page.setViewportSize({ width, height: 844 });
+    if (width === 390) {
+      await expect(page.getByRole("navigation", { name: "Workspace" })).toBeHidden();
+      await page.getByRole("button", { name: "Expand sidebar" }).click();
+    }
     await expect(page.getByRole("navigation", { name: "Workspace" })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     const brand = page.locator(".sidebar-brand-text");
-    expect(await brand.evaluate((element) => element.scrollWidth <= element.clientWidth)).toBe(true);
+    // The sidebar can still be resizing after navigation first becomes visible.
+    await expect
+      .poll(() => brand.evaluate((element) => element.scrollWidth - element.clientWidth), { message: `Sidebar brand fits at ${width}px` })
+      .toBeLessThanOrEqual(0);
     await page.screenshot({ animations: "disabled", path: testInfo.outputPath(`sidebar-${width}.png`) });
   }
 

@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { createDefaultChurchState } from "@openoverlay/shared";
 import { makeTestServer, signup } from "./helpers.js";
 
 let server: ReturnType<typeof makeTestServer>;
@@ -14,11 +15,85 @@ afterEach(() => {
 });
 
 describe("preset integrity and API resilience", () => {
+  it("keeps drafts and notes off public output while stage requires a rotatable key", async () => {
+    await signup(server.agent, "stage-boundary@example.com");
+    const state = createDefaultChurchState("Private service");
+    state.slides = [
+      { ...state.slides[0], id: "draft", text: "Unpublished draft", notes: "Private cue" },
+      { ...state.slides[0], id: "live", text: "Published slide", notes: "Stage only" }
+    ];
+    state.selectedSlideId = "draft";
+    state.onAirSlide = structuredClone(state.slides[1]);
+    state.stageMessage = "Stage message secret";
+    state.elements.fullscreenSlide.visible = true;
+    const created = await server.agent.post("/api/presets").send({ name: "Private service", type: "church", state }).expect(201);
+    const id = created.body.preset.id as string;
+    const publicId = created.body.preset.publicId as string;
+    const publicResponse = await server.request.get(`/api/v1/overlay/${publicId}`).expect(200);
+    expect(JSON.stringify(publicResponse.body)).not.toMatch(/Unpublished draft|Private cue|Stage only|Stage message secret/);
+    expect(publicResponse.body.overlay.state.slides).toHaveLength(1);
+    expect(publicResponse.body.overlay.state.slides[0].text).toBe("Published slide");
+    await server.request.get(`/api/v1/stage/${publicId}`).expect(404);
+    const first = await server.agent.get(`/api/v1/presets/${id}/stage`).expect(200);
+    const key = first.body.stageKey as string;
+    expect(key).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const stage = await server.request.get(`/api/v1/stage/${publicId}`).set("X-OpenOverlay-Stage-Key", key).expect(200);
+    expect(stage.body.overlay.state.stageMessage).toBe("Stage message secret");
+    expect(stage.body.overlay.state.slides).toHaveLength(2);
+    const rotated = await server.agent.post(`/api/v1/presets/${id}/stage/rotate`).expect(200);
+    expect(rotated.body.stageKey).not.toBe(key);
+    await server.request.get(`/api/v1/stage/${publicId}`).set("X-OpenOverlay-Stage-Key", key).expect(404);
+    await server.request.get(`/api/v1/stage/${publicId}`).set("X-OpenOverlay-Stage-Key", rotated.body.stageKey).expect(200);
+    await server.agent.delete(`/api/v1/presets/${id}/stage`).expect(200);
+    await server.request.get(`/api/v1/stage/${publicId}`).set("X-OpenOverlay-Stage-Key", rotated.body.stageKey).expect(404);
+  });
   it("rejects incomplete explicit states before persistence", async () => {
     await signup(server.agent, "state-create@example.com");
     await server.agent.post("/api/presets").send({ name: "Broken", type: "soccer", state: {} }).expect(400);
     const list = await server.agent.get("/api/presets").expect(200);
     expect(list.body.presets).toHaveLength(0);
+  });
+
+  it("accepts payload-free actions and rejects invalid team fields and share sides", async () => {
+    await signup(server.agent, "action-validation@example.com");
+    const preset = await server.agent.post("/api/presets").send({ name: "Match", type: "soccer" }).expect(201);
+    const id = preset.body.preset.id as string;
+    const action = await server.agent.post(`/api/v1/presets/${id}/actions/home-score-plus`).expect(200);
+    expect(action.body.preset.state.score.home).toBe(1);
+    await server.agent.post("/api/teams").send({ fullName: 123 }).expect(400);
+    const team = await server.agent.post("/api/teams").send({ fullName: "Home" }).expect(201);
+    await server.agent.patch(`/api/teams/${team.body.team.id}`).send({ coach: false, expectedRevision: 1 }).expect(400);
+    await server.agent.post(`/api/presets/${id}/share-team`).send({ email: "recipient@example.com", side: "invalid" }).expect(400);
+  });
+
+  it("recovers lost mutation responses without applying an action twice", async () => {
+    await signup(server.agent, "receipt-recovery@example.com");
+    const created = await server.agent.post("/api/presets").send({ name: "Receipt", type: "soccer" }).expect(201);
+    const id = created.body.preset.id as string;
+    const actionPath = `/api/v1/presets/${id}/actions/home-score-plus`;
+    const first = await server.agent.post(actionPath).set("Idempotency-Key", "score-event-0001").send({ expectedRevision: 1 }).expect(200);
+    expect(first.body.appliedRevision).toBe(2);
+    const later = await server.agent.post(actionPath).send({ expectedRevision: 2 }).expect(200);
+    expect(later.body.preset.state.score.home).toBe(2);
+    const replay = await server.agent.post(actionPath).set("Idempotency-Key", "score-event-0001").send({ expectedRevision: 1 }).expect(200);
+    expect(replay.body.appliedRevision).toBe(2);
+    expect(replay.body.preset.revision).toBe(3);
+    expect(replay.body.preset.state.score.home).toBe(2);
+    await server.agent.post(actionPath).set("Idempotency-Key", "score-event-0001").send({ expectedRevision: 3 }).expect(409);
+
+    const patch = await server.agent
+      .patch(`/api/v1/presets/${id}`)
+      .set("Idempotency-Key", "patch-event-0001")
+      .send({ expectedRevision: 3, name: "Renamed" })
+      .expect(200);
+    expect(patch.body.appliedRevision).toBe(4);
+    const patchReplay = await server.agent
+      .patch(`/api/v1/presets/${id}`)
+      .set("Idempotency-Key", "patch-event-0001")
+      .send({ expectedRevision: 3, name: "Renamed" })
+      .expect(200);
+    expect(patchReplay.body.preset.revision).toBe(4);
+    expect(patchReplay.body.appliedRevision).toBe(4);
   });
 
   it("recovers corrupt stored rows without taking down list or overlay reads", async () => {

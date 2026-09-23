@@ -12,17 +12,17 @@ id openoverlay >/dev/null 2>&1 || useradd --system --gid openoverlay --home-dir 
 id deploy-openoverlay >/dev/null 2>&1 || useradd --system --gid openoverlay --create-home --home-dir /var/lib/deploy-openoverlay --shell /usr/sbin/nologin deploy-openoverlay
 
 install -d -m 0750 -o root -g openoverlay /opt/openoverlay /opt/openoverlay/releases
-install -d -m 0750 -o openoverlay -g openoverlay /var/lib/openoverlay /var/lib/openoverlay/uploads /var/log/openoverlay
-chown -R openoverlay:openoverlay /var/lib/openoverlay /var/log/openoverlay
+if [[ ! -d /var/lib/openoverlay ]]; then install -d -m 0750 -o skylarenns -g openoverlay /var/lib/openoverlay; fi
+if [[ ! -d /var/lib/openoverlay/uploads ]]; then install -d -m 0750 -o skylarenns -g openoverlay /var/lib/openoverlay/uploads; fi
+if [[ ! -d /var/log/openoverlay ]]; then install -d -m 0750 -o skylarenns -g openoverlay /var/log/openoverlay; fi
 if [[ -f /etc/openoverlaybackend.env ]]; then
   chown root:openoverlay /etc/openoverlaybackend.env
   chmod 0640 /etc/openoverlaybackend.env
 fi
 install -d -m 0700 -o root -g root /var/backups/openoverlay
 install -m 0750 -o root -g root scripts/openoverlay-deploy /usr/local/sbin/openoverlay-deploy
-install -m 0644 -o root -g root apps/backend/systemd/Openoverlaybackend.service /etc/systemd/system/Openoverlaybackend.service
-install -m 0644 -o root -g root apps/backend/systemd/openoverlay-backup.service /etc/systemd/system/openoverlay-backup.service
-install -m 0644 -o root -g root apps/backend/systemd/openoverlay-backup.timer /etc/systemd/system/openoverlay-backup.timer
+install -d -m 0755 -o root -g root /etc/openoverlay
+install -m 0644 -o root -g root apps/backend/systemd/Openoverlaybackend.service /etc/openoverlay/Openoverlaybackend.immutable.service
 install -m 0644 -o root -g root apps/backend/systemd/openoverlay-cloudflared-version-check.service /etc/systemd/system/openoverlay-cloudflared-version-check.service
 install -m 0644 -o root -g root apps/backend/systemd/openoverlay-cloudflared-version-check.timer /etc/systemd/system/openoverlay-cloudflared-version-check.timer
 
@@ -43,6 +43,5 @@ printf '%s\n' 'deploy-openoverlay ALL=(root) NOPASSWD: /usr/local/sbin/openoverl
 chmod 0440 "$SUDOERS"
 visudo -cf "$SUDOERS"
 systemctl daemon-reload
-systemctl enable openoverlay-backup.timer
-systemctl enable openoverlay-cloudflared-version-check.timer
-printf 'OpenOverlay release host bootstrap installed. The existing service has not been restarted.\n'
+systemctl enable --now openoverlay-cloudflared-version-check.timer
+printf 'Immutable candidate staged. Active backend unit and runtime data ownership remain unchanged. Install verified backups separately.\n'

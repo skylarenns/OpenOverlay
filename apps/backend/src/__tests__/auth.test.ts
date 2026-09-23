@@ -118,6 +118,19 @@ describe("auth", () => {
     await server.agent.post("/api/teams").set("Origin", "http://localhost:5173").send({ fullName: "Local FC", shortName: "Local" }).expect(201);
   });
 
+  it("requires an allowed origin for production cookie writes", async () => {
+    server.close();
+    server = makeTestServer({ env: "production", jwtSecret: "x".repeat(32) });
+    const signupResponse = await server.request.post("/api/auth/signup").send({ email: "prod-origin@example.com", password: "password123" }).expect(201);
+    const setCookie = signupResponse.headers["set-cookie"];
+    const cookie = (Array.isArray(setCookie) ? setCookie[0] : setCookie).split(";", 1)[0]!;
+    const payload = { fullName: "Allowed FC", shortName: "Allowed" };
+
+    await server.request.post("/api/teams").set("Cookie", cookie).send(payload).expect(403);
+    await server.request.post("/api/teams").set("Cookie", cookie).set("Origin", "https://evil.example").send(payload).expect(403);
+    await server.request.post("/api/teams").set("Cookie", cookie).set("Origin", "http://localhost:5173").send(payload).expect(201);
+  });
+
   it("fails closed for invalid environments and weak production secrets", () => {
     expect(() => loadConfig({ env: "prod" as "production", jwtSecret: "x".repeat(32) })).toThrow(/Invalid NODE_ENV/);
     expect(() => loadConfig({ env: "production", jwtSecret: "short" })).toThrow(/at least 32 bytes/);
@@ -154,5 +167,15 @@ describe("auth", () => {
     const actions = new AuthRateLimiter();
     for (let index = 0; index < 600; index += 1) actions.reserveAction("preset-1", "127.0.0.2", 1_000);
     expect(() => actions.reserveAction("preset-1", "127.0.0.2", 1_000)).toThrow(/Too many action requests/);
+
+    const reads = new AuthRateLimiter();
+    for (let index = 0; index < 120; index += 1) reads.reserveSensitiveRead("user-1", "127.0.0.3", 1_000);
+    expect(() => reads.reserveSensitiveRead("user-1", "127.0.0.3", 1_000)).toThrow(/Too many sensitive read requests/);
+
+    const unauthenticated = new AuthRateLimiter();
+    for (let index = 0; index < 240; index += 1) unauthenticated.reserveSensitiveReadIp("127.0.0.4", 1_000);
+    expect(() => unauthenticated.reserveSensitiveReadIp("127.0.0.4", 1_000)).toThrow(/Too many sensitive read requests/);
+    for (let index = 0; index < 1_200; index += 1) unauthenticated.reserveWriteIp("127.0.0.5", 1_000);
+    expect(() => unauthenticated.reserveWriteIp("127.0.0.5", 1_000)).toThrow(/Too many write requests/);
   });
 });

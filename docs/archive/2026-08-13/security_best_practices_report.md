@@ -1,5 +1,7 @@
 # OpenOverlay Security Best-Practices Review
 
+Historical snapshot for the August 2026 baseline. Findings and rollout status below describe that audit date, not the current checkout or production state.
+
 ## Remediation update — 2026-08-13
 
 The mutable in-process updater has been removed in Release A (`1d17f40`). Replacement controls include exact-SHA/checksum archive validation, traversal/link rejection, bounded input, a global deployment lock, immutable root-owned releases, a non-login service account, systemd filesystem/kernel/device hardening, activity-aware promotion refusal, isolated copied-database preflight, verified backup/restore, and automatic backend/Vercel rollback wiring. The public production workflow is fail-closed until environment-scoped secrets and an explicit enablement variable are installed interactively.

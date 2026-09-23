@@ -35,6 +35,8 @@ export class AuthRateLimiter {
   private readonly uploadByIdentity = new Map<string, RateBucket>();
   private readonly writeByIdentity = new Map<string, RateBucket>();
   private readonly writeByIp = new Map<string, RateBucket>();
+  private readonly sensitiveReadByIdentity = new Map<string, RateBucket>();
+  private readonly sensitiveReadByIp = new Map<string, RateBucket>();
   private readonly actionByPreset = new Map<string, RateBucket>();
 
   reserveLogin(email: string, ip: string, now = Date.now()): void {
@@ -55,8 +57,29 @@ export class AuthRateLimiter {
   }
 
   reserveWrite(userId: string, ip: string, now = Date.now()): void {
+    this.reserveWriteIp(ip, now);
+    this.reserveWriteIdentity(userId, now);
+  }
+
+  reserveWriteIp(ip: string, now = Date.now()): void {
     consumeRate(this.writeByIp, ip, 1_200, 10 * 60_000, now, "Too many write requests");
+  }
+
+  reserveWriteIdentity(userId: string, now = Date.now()): void {
     consumeRate(this.writeByIdentity, userId, 600, 10 * 60_000, now, "Too many write requests");
+  }
+
+  reserveSensitiveRead(userId: string, ip: string, now = Date.now()): void {
+    this.reserveSensitiveReadIp(ip, now);
+    this.reserveSensitiveReadIdentity(userId, now);
+  }
+
+  reserveSensitiveReadIp(ip: string, now = Date.now()): void {
+    consumeRate(this.sensitiveReadByIp, ip, 240, 10 * 60_000, now, "Too many sensitive read requests");
+  }
+
+  reserveSensitiveReadIdentity(userId: string, now = Date.now()): void {
+    consumeRate(this.sensitiveReadByIdentity, userId, 120, 10 * 60_000, now, "Too many sensitive read requests");
   }
 
   reserveAction(presetId: string, ip: string, now = Date.now()): void {

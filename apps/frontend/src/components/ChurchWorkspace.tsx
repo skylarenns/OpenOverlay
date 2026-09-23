@@ -6,6 +6,8 @@ import {
   orderedChurchSlides,
   prepareChurchSlides,
   importChurchService,
+  MAX_PRESET_STATE_BYTES,
+  MAX_SERVICE_FILE_BYTES,
   exportChurchService,
   makeId,
   type ChurchBackgroundPreset,
@@ -15,6 +17,7 @@ import {
 } from "@openoverlay/shared";
 import { mediaApi, type MediaItem } from "../lib/api";
 import { ChurchBackgroundPicker, ChurchSlideContent } from "./ChurchPresentation";
+import { announceMediaUpload, MediaPicker } from "./MediaPicker";
 
 interface Props {
   state: ChurchState;
@@ -40,11 +43,12 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
   const onAir = churchOnAirSlide(state);
   const ordered = orderedChurchSlides(state);
   const sections = churchSections(state);
-  const selected = state.slides.find((slide) => slide.id === state.selectedSlideId) ?? ordered[0];
+  const selectedCandidate = state.slides.find((slide) => slide.id === state.selectedSlideId);
   const [sectionChoice, setSectionChoice] = useState<string | null>(null);
-  const section = sectionChoice !== null && sections.includes(sectionChoice) ? sectionChoice : (selected?.section ?? sections[0] ?? "Service");
+  const section = sectionChoice !== null && sections.includes(sectionChoice) ? sectionChoice : (selectedCandidate?.section ?? sections[0] ?? "Service");
   const sectionSlides = ordered.filter((slide) => slide.section === section);
-  const [editing, setEditing] = useState(!selected?.text);
+  const selected = selectedCandidate?.section === section ? selectedCandidate : sectionSlides[0];
+  const [editing, setEditing] = useState(() => !selected?.text && !(window.matchMedia?.("(max-width: 640px)").matches ?? false));
   const [search, setSearch] = useState("");
   const [composer, setComposer] = useState<ItemKind | null>(null);
   const [imported, setImported] = useState<ReturnType<typeof importChurchService> | null>(null);
@@ -124,6 +128,7 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
       const { media: item } = await mediaApi.upload(file, controller.signal);
       if (controller.signal.aborted) return;
       setUploadedMedia((items) => [...items, item]);
+      announceMediaUpload(item);
       const current = latest.current;
       if (!current.disabled && current.state.slides.some((slide) => slide.id === slideId)) {
         const live = churchOnAirSlide(current.state);
@@ -225,7 +230,12 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
       names.push(name);
     });
     const slides = content.slides.map((slide) => ({ ...slide, id: makeId("slide"), section: mapped.get(slide.section) ?? slide.section }));
-    commitDraft({ sections: names, slides: [...state.slides, ...slides], selectedSlideId: slides[0]?.id ?? selected?.id });
+    const next = { ...state, sections: names, slides: [...state.slides, ...slides], selectedSlideId: slides[0]?.id ?? selected?.id };
+    if (new TextEncoder().encode(JSON.stringify(next)).byteLength > MAX_PRESET_STATE_BYTES) {
+      setError("This service exceeds the 512 KiB saved-state limit. Remove slides or split the service.");
+      return;
+    }
+    commitState(next);
     setSectionChoice(slides[0]?.section ?? names.at(-1) ?? null);
     setComposer(null);
     setImported(null);
@@ -247,7 +257,7 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
   async function readFile(file: File | undefined) {
     if (!file) return;
     try {
-      if (file.size > 512_000) throw new Error("Choose a file smaller than 512 KB.");
+      if (file.size > MAX_SERVICE_FILE_BYTES) throw new Error("Choose a file 2 MiB or smaller.");
       const source = await file.text();
       if (file.name.toLowerCase().endsWith(".json")) {
         setImported(importChurchService(source));
@@ -329,6 +339,71 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
         </div>
       ) : null}
       <div className="church-desk">
+        <aside className="church-monitors" aria-label="Preview and output controls">
+          <div className="church-heading">
+            <h2>Preview</h2>
+            <span>Ready to show</span>
+          </div>
+          <div className="church-monitor" role="group" aria-label="Selected slide preview">
+            {selected ? <ChurchSlideContent slide={selected} font={state.style.font} /> : <span>No slide selected</span>}
+          </div>
+          <div className="church-heading">
+            <h2>Live output</h2>
+            <span className={isLive && !state.blackout ? "church-live-label" : ""}>{state.blackout ? "Blackout" : isLive ? "On air" : "Off air"}</span>
+          </div>
+          <div className="church-monitor church-program" role="group" aria-label="Live output preview">
+            {outputUrl ? (
+              <iframe title="Church live output" src={`${outputUrl}?client=preview&display=projector`} />
+            ) : isLive && onAir && !state.blackout ? (
+              <ChurchSlideContent slide={onAir} hideText={state.textCleared} font={state.style.font} />
+            ) : (
+              <span>{state.blackout ? "Blackout" : "Screen clear"}</span>
+            )}
+          </div>
+          {outputUrl ? (
+            <div className="church-output-links">
+              <a className="button" href={`${outputUrl}?display=projector`} target="_blank" rel="noreferrer">
+                Open projector
+              </a>
+              <p>Use Stage display above for the private stage link. Move windows to their displays; press F for fullscreen.</p>
+            </div>
+          ) : null}
+          <details className="church-service-tools" open>
+            <summary>Countdown & lower third</summary>
+            {cues}
+          </details>
+          <details className="church-service-tools">
+            <summary>Stage message</summary>
+            <form
+              className="form-grid"
+              onSubmit={(event) => {
+                event.preventDefault();
+                commitDraft({ stageMessage: stageDraft.trim() });
+              }}
+            >
+              <label className="field">
+                <span>Message to stage</span>
+                <textarea maxLength={500} value={stageDraft} onChange={(event) => setStageDraft(event.target.value)} />
+              </label>
+              <div className="control-row">
+                <button type="submit" className="button" disabled={disabled}>
+                  Send to stage
+                </button>
+                <button
+                  type="button"
+                  className="button"
+                  disabled={disabled || !state.stageMessage}
+                  onClick={() => {
+                    setStageDraft("");
+                    commitDraft({ stageMessage: "" });
+                  }}
+                >
+                  Clear message
+                </button>
+              </div>
+            </form>
+          </details>
+        </aside>
         <aside className="church-rundown" aria-label="Service planning">
           <div className="church-heading">
             <h2>Service order</h2>
@@ -377,7 +452,7 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
                   onClick={() => {
                     setSectionChoice(item);
                     setSearch("");
-                    if (slides[0]) commitDraft({ selectedSlideId: slides[0].id });
+                    commitDraft({ selectedSlideId: slides[0]?.id });
                   }}
                 >
                   <span className="church-item-number">{String(index + 1).padStart(2, "0")}</span>
@@ -477,7 +552,7 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
                   type="button"
                   key={slide.id}
                   className={`church-thumbnail ${selected?.id === slide.id ? "selected" : ""} ${isLive && onAir?.id === slide.id ? "on-air" : ""}`}
-                  aria-label={`Preview ${slide.title}`}
+                  aria-label={`Preview ${slide.title}, slide ${ordered.indexOf(slide) + 1} of ${ordered.length}${isLive && onAir?.id === slide.id ? ", on air" : ""}`}
                   aria-pressed={selected?.id === slide.id}
                   onClick={() => select(slide)}
                 >
@@ -559,23 +634,14 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
                   onMotionChange={(backgroundMotion) => updateSlide({ backgroundMotion })}
                 />
                 <div className="two-col">
-                  <label className="field">
-                    <span>Image/background</span>
-                    <select
-                      value={selected.mediaId ?? ""}
-                      onChange={(event) => {
-                        const item = availableMedia.find((candidate) => candidate.id === event.target.value);
-                        updateSlide({ mediaId: item?.id, mediaUrl: item?.url, type: item ? "image" : "text", backgroundPreset: "solid" });
-                      }}
-                    >
-                      <option value="">None</option>
-                      {availableMedia.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.originalFilename}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  <div className="field">
+                    <MediaPicker
+                      label="Image/background"
+                      selectedId={selected.mediaId}
+                      initialItems={availableMedia}
+                      onSelect={(item) => updateSlide({ mediaId: item?.id, mediaUrl: item?.url, type: item ? "image" : "text", backgroundPreset: "solid" })}
+                    />
+                  </div>
                   <label className="field">
                     <span>Background dimming</span>
                     <input
@@ -721,74 +787,6 @@ export function ChurchWorkspace({ state, media, commitState, cues, outputUrl, di
             </details>
           ) : null}
         </section>
-        <aside className="church-monitors" aria-label="Preview and output controls">
-          <div className="church-heading">
-            <h2>Preview</h2>
-            <span>Ready to show</span>
-          </div>
-          <div className="church-monitor" role="group" aria-label="Selected slide preview">
-            {selected ? <ChurchSlideContent slide={selected} font={state.style.font} /> : <span>No slide selected</span>}
-          </div>
-          <div className="church-heading">
-            <h2>Live output</h2>
-            <span className={isLive && !state.blackout ? "church-live-label" : ""}>{state.blackout ? "Blackout" : isLive ? "On air" : "Off air"}</span>
-          </div>
-          <div className="church-monitor church-program" role="group" aria-label="Live output preview">
-            {outputUrl ? (
-              <iframe title="Church live output" src={`${outputUrl}?client=preview&display=projector`} />
-            ) : isLive && onAir && !state.blackout ? (
-              <ChurchSlideContent slide={onAir} hideText={state.textCleared} font={state.style.font} />
-            ) : (
-              <span>{state.blackout ? "Blackout" : "Screen clear"}</span>
-            )}
-          </div>
-          {outputUrl ? (
-            <div className="church-output-links">
-              <a className="button" href={`${outputUrl}?display=projector`} target="_blank" rel="noreferrer">
-                Open projector
-              </a>
-              <a className="button" href={`${outputUrl}?display=stage`} target="_blank" rel="noreferrer">
-                Open stage screen
-              </a>
-              <p>Move each window to its display. Press F for fullscreen.</p>
-            </div>
-          ) : null}
-          <details className="church-service-tools" open>
-            <summary>Countdown & lower third</summary>
-            {cues}
-          </details>
-          <details className="church-service-tools">
-            <summary>Stage message</summary>
-            <form
-              className="form-grid"
-              onSubmit={(event) => {
-                event.preventDefault();
-                commitDraft({ stageMessage: stageDraft.trim() });
-              }}
-            >
-              <label className="field">
-                <span>Message to stage</span>
-                <textarea maxLength={500} value={stageDraft} onChange={(event) => setStageDraft(event.target.value)} />
-              </label>
-              <div className="control-row">
-                <button type="submit" className="button" disabled={disabled}>
-                  Send to stage
-                </button>
-                <button
-                  type="button"
-                  className="button"
-                  disabled={disabled || !state.stageMessage}
-                  onClick={() => {
-                    setStageDraft("");
-                    commitDraft({ stageMessage: "" });
-                  }}
-                >
-                  Clear message
-                </button>
-              </div>
-            </form>
-          </details>
-        </aside>
       </div>
       {composer ? (
         <ServiceComposer

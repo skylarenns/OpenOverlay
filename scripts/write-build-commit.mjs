@@ -6,7 +6,7 @@ import path from "node:path";
 
 const outputDirectory = path.resolve(process.argv[2] || "apps/backend/dist");
 const markerPath = path.join(outputDirectory, ".openoverlay-build-commit");
-const commit = gitCommit() || firstNonEmpty(process.env.GIT_COMMIT_SHA, process.env.VERCEL_GIT_COMMIT_SHA);
+const commit = gitCommit() || firstNonEmpty(process.env.OPENOVERLAY_GIT_SHA, process.env.GIT_COMMIT_SHA, process.env.VERCEL_GIT_COMMIT_SHA);
 
 if (!commit) {
   fs.rmSync(markerPath, { force: true });

@@ -1,12 +1,21 @@
 import { ChurchWorkspace } from "./components/ChurchWorkspace";
-import { ChurchDisplay, ChurchStageScreen } from "./components/ChurchPresentation";
 import { ActionMenu, CopyButton, RecordInput } from "./components/Controls";
 import { CachedPages } from "./components/CachedPages";
+import { announceMediaUpload, MEDIA_UPLOADED_EVENT, MediaPicker, mergeMediaItems } from "./components/MediaPicker";
+import { StageLinkControls } from "./components/StageLinkControls";
+import { SoccerCountdownPanel, SoccerScoreClockPanel, SyncedTimeInput, useControlTime } from "./components/SoccerTimingControls";
+export { SoccerCountdownPanel, SoccerScoreClockPanel, SyncedTimeInput } from "./components/SoccerTimingControls";
+import { ModalLayer } from "./components/ModalLayer";
+import { Dashboard, formatOverlayClientCount } from "./pages/Dashboard";
+import { PRESET_DELETED_UI_EVENT, dispatchPresetDeleted } from "./lib/uiEvents";
+import { MediaLibrary } from "./pages/MediaLibrary";
+export { MediaLibrary } from "./pages/MediaLibrary";
 import { PageSkeleton, SidebarSkeleton, TeamEditorSkeleton, TeamListSkeleton } from "./components/PageSkeleton";
 import { RealtimeRetry } from "./lib/realtimeRetry";
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
-import { Link, NavLink, Navigate, Route, Routes, useBlocker, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { OverlayPage } from "./OverlayPage";
+export { OverlayPage } from "./OverlayPage";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { Link, NavLink, Navigate, Route, Routes, useBlocker, useLocation, useNavigate, useParams } from "react-router-dom";
 import { io } from "socket.io-client";
 import {
   AlertTriangle,
@@ -57,7 +66,6 @@ import {
   type PresetListItem,
   type PresetState,
   type PresetSummary,
-  type PresetType,
   type SoccerLabOverlay,
   type SoccerOverlayPackage,
   type SoccerState,
@@ -87,6 +95,8 @@ import {
   type User
 } from "./lib/api";
 import { DebouncedSerialMutationQueue, KeyedDebouncer, KeyedSerialTaskQueue } from "./lib/mutationQueue";
+
+const pendingActionKeys = new Map<string, string>();
 
 interface AuthContextValue {
   user: User | null;
@@ -131,15 +141,8 @@ const SIDEBAR_MAX_WIDTH = 360;
 const SIDEBAR_DEFAULT_WIDTH = 232;
 const PROGRAMMATIC_NAVIGATION_EVENT = "openoverlay:before-programmatic-navigation";
 const ALLOW_PROGRAMMATIC_NAVIGATION_EVENT = "openoverlay:allow-programmatic-navigation";
-const PRESET_DELETED_UI_EVENT = "openoverlay:preset-deleted";
 const DEPLOYMENT_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const DEFAULT_TEAM_COLOR_PAIRS = [defaultTeamColors.home, defaultTeamColors.away];
-const PRESET_NAME_PLACEHOLDERS: Record<PresetType, string> = {
-  soccer: "Soccer Game",
-  church: "Church Sunday",
-  custom: "Custom"
-};
-
 export function App() {
   return (
     <ThemeProvider>
@@ -380,99 +383,6 @@ function useResizableSidebar() {
   return { width, resizing, startDrag, resizeWithKeyboard };
 }
 
-const MODAL_FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  "[tabindex]:not([tabindex='-1'])"
-].join(",");
-
-function ModalLayer({
-  children,
-  initialFocusRef,
-  onClose
-}: {
-  children: React.ReactNode;
-  initialFocusRef?: React.RefObject<HTMLElement | null>;
-  onClose: () => void;
-}) {
-  const layerRef = useRef<HTMLDivElement | null>(null);
-  const openerRef = useRef<HTMLElement | null>(null);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-
-  useLayoutEffect(() => {
-    openerRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const appRoot = document.getElementById("root");
-    const wasInert = appRoot?.hasAttribute("inert") ?? false;
-    const previousAriaHidden = appRoot?.getAttribute("aria-hidden") ?? null;
-    if (appRoot) {
-      appRoot.setAttribute("inert", "");
-      appRoot.setAttribute("aria-hidden", "true");
-    }
-
-    const firstFocusable = () => {
-      const requested = initialFocusRef?.current;
-      const fallback = layerRef.current?.querySelector<HTMLElement>(MODAL_FOCUSABLE_SELECTOR) ?? layerRef.current;
-      (requested ?? fallback)?.focus();
-    };
-    firstFocusable();
-
-    function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCloseRef.current();
-        return;
-      }
-      if (event.key !== "Tab" || !layerRef.current) return;
-      const focusable = [...layerRef.current.querySelectorAll<HTMLElement>(MODAL_FOCUSABLE_SELECTOR)].filter(
-        (element) => !element.hidden && element.getAttribute("aria-hidden") !== "true"
-      );
-      if (focusable.length === 0) {
-        event.preventDefault();
-        layerRef.current.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    }
-
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      if (appRoot) {
-        if (!wasInert) appRoot.removeAttribute("inert");
-        if (previousAriaHidden === null) appRoot.removeAttribute("aria-hidden");
-        else appRoot.setAttribute("aria-hidden", previousAriaHidden);
-      }
-      openerRef.current?.focus();
-    };
-  }, [initialFocusRef]);
-
-  return createPortal(
-    <div
-      ref={layerRef}
-      className="prompt-backdrop"
-      tabIndex={-1}
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onCloseRef.current();
-      }}
-    >
-      {children}
-    </div>,
-    document.body
-  );
-}
-
 export function PromptDialogProvider({ children }: { children: React.ReactNode }) {
   const [dialog, setDialog] = useState<PromptDialogOptions | null>(null);
   const [value, setValue] = useState("");
@@ -585,6 +495,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const expire = () => {
       refreshGenerationRef.current += 1;
+      pendingActionKeys.clear();
       setUser(null);
       setError(null);
       setLoading(false);
@@ -598,6 +509,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     refreshGenerationRef.current += 1;
     setLoading(false);
     await authApi.logout();
+    pendingActionKeys.clear();
     beforeSessionClear?.();
     setUser(null);
     setError(null);
@@ -708,7 +620,7 @@ function Login({ mode }: { mode: "login" | "signup" }) {
       await refresh();
       const requestedPath = (location.state as { from?: unknown } | null)?.from;
       const destination = typeof requestedPath === "string" && requestedPath.startsWith("/dash") && !requestedPath.startsWith("//") ? requestedPath : "/dash";
-      navigate(destination, { replace: true });
+      void navigate(destination, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
@@ -767,7 +679,10 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const { width: sidebarWidth, resizing, startDrag, resizeWithKeyboard } = useResizableSidebar();
   const [games, setGames] = useState<PresetListItem[]>([]);
   const [gamesLoaded, setGamesLoaded] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.matchMedia?.("(max-width: 760px)").matches ?? false);
+  const [manualSidebarCollapsed, setManualSidebarCollapsed] = useState(false);
+  const [mobileSidebarCollapsed, setMobileSidebarCollapsed] = useState(true);
+  const [isMobileSidebar, setIsMobileSidebar] = useState(() => window.matchMedia?.("(max-width: 760px)").matches ?? false);
+  const sidebarCollapsed = isMobileSidebar ? mobileSidebarCollapsed : manualSidebarCollapsed;
   const [presetMenu, setPresetMenu] = useState<{ game: PresetListItem; x: number; y: number; trigger: HTMLElement | null } | null>(null);
   const presetMenuRef = useRef<HTMLDivElement | null>(null);
   const [shellError, setShellError] = useState<string | null>(null);
@@ -778,8 +693,16 @@ function AppShell({ children }: { children: React.ReactNode }) {
   const locationRef = useRef(location);
   locationRef.current = location;
   useEffect(() => {
-    if (window.matchMedia?.("(max-width: 760px)").matches ?? false) setSidebarCollapsed(true);
-  }, [location.pathname]);
+    const media = window.matchMedia?.("(max-width: 760px)");
+    if (!media) return;
+    const update = () => setIsMobileSidebar(media.matches);
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+
+  useEffect(() => {
+    if (isMobileSidebar) setMobileSidebarCollapsed(true);
+  }, [isMobileSidebar, location.pathname]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -793,7 +716,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       })
       .catch((err) => {
         if (controller.signal.aborted) return;
-        setShellError(err instanceof Error ? err.message : "Could not load sidebar games");
+        setShellError(err instanceof Error ? err.message : "Could not load sidebar productions");
         setGamesLoaded(true);
       });
     return () => controller.abort();
@@ -875,7 +798,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setShellError(null);
       if (locationRef.current.key !== sourceLocationKey) return;
       allowProgrammaticNavigation();
-      navigate(`/dash/presets/${response.preset.id}`);
+      void navigate(`/dash/presets/${response.preset.id}`);
     } catch (err) {
       setShellError(err instanceof Error ? err.message : "Could not duplicate game");
     } finally {
@@ -902,7 +825,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
       setShellError(null);
       if (deletesCurrentGame && locationRef.current.key === sourceLocationKey) {
         allowProgrammaticNavigation();
-        navigate("/dash");
+        void navigate("/dash");
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 404) {
@@ -911,7 +834,7 @@ function AppShell({ children }: { children: React.ReactNode }) {
         setShellError("That game was already deleted in another session.");
         if (deletesCurrentGame && locationRef.current.key === sourceLocationKey) {
           allowProgrammaticNavigation();
-          navigate("/dash");
+          void navigate("/dash");
         }
       } else if (err instanceof ApiError && err.status === 409) {
         try {
@@ -951,19 +874,25 @@ function AppShell({ children }: { children: React.ReactNode }) {
               title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
               aria-expanded={!sidebarCollapsed}
               aria-controls="workspace-navigation"
-              onClick={() => setSidebarCollapsed((value) => !value)}
+              onClick={() => {
+                if (isMobileSidebar) {
+                  setMobileSidebarCollapsed((value) => !value);
+                } else {
+                  setManualSidebarCollapsed((value) => !value);
+                }
+              }}
             >
               {sidebarCollapsed ? <PanelLeftOpen size={19} strokeWidth={2.2} /> : <PanelLeftClose size={19} strokeWidth={2.2} />}
             </button>
           </div>
           <nav id="workspace-navigation" className="sidebar-nav" aria-label="Workspace" inert={sidebarCollapsed} aria-hidden={sidebarCollapsed}>
             <NavLink to="/dash" end>
-              <LayoutDashboard size={18} /> <span className="nav-label">Games</span>
+              <LayoutDashboard size={18} /> <span className="nav-label">Productions</span>
             </NavLink>
             {!gamesLoaded ? (
               <SidebarSkeleton />
             ) : games.length > 0 ? (
-              <div className="sidebar-subnav" aria-label="Active games">
+              <div className="sidebar-subnav" aria-label="Productions">
                 {games.map((game) => (
                   <NavLink
                     key={game.id}
@@ -1072,224 +1001,11 @@ function AppShell({ children }: { children: React.ReactNode }) {
   );
 }
 
-function formatOverlayClientCount(count: number): string {
-  return `${count} ${count === 1 ? "output" : "outputs"}`;
-}
-
-function Dashboard() {
-  const [presets, setPresets] = useState<PresetListItem[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [isNewGameOpen, setIsNewGameOpen] = useState(false);
-  const [newGameType, setNewGameType] = useState<PresetType>("soccer");
-  const [newGameName, setNewGameName] = useState(PRESET_NAME_PLACEHOLDERS.soccer);
-  const [creatingGame, setCreatingGame] = useState(false);
-  const [createError, setCreateError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [cardBusy, setCardBusy] = useState<string | null>(null);
-  const creatingGameRef = useRef(false);
-  const loadGenerationRef = useRef(0);
-  const navigate = useNavigate();
-  const newGameNameRef = useRef<HTMLInputElement | null>(null);
-
-  const load = useCallback(async (signal?: AbortSignal) => {
-    const generation = loadGenerationRef.current + 1;
-    loadGenerationRef.current = generation;
-    const response = await presetApi.list(signal);
-    if (signal?.aborted || generation !== loadGenerationRef.current) return;
-    setPresets(response.presets);
-    setLoading(false);
-    setError(null);
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    const refresh = () =>
-      void load(controller.signal).catch((err) => {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-          setError(err instanceof Error ? err.message : "Could not load games");
-        }
-      });
-    const refreshWhenVisible = () => {
-      if (document.visibilityState === "visible") refresh();
-    };
-    refresh();
-    const interval = window.setInterval(refresh, 15_000);
-    window.addEventListener("focus", refresh);
-    document.addEventListener("visibilitychange", refreshWhenVisible);
-    return () => {
-      controller.abort();
-      window.clearInterval(interval);
-      window.removeEventListener("focus", refresh);
-      document.removeEventListener("visibilitychange", refreshWhenVisible);
-    };
-  }, [load]);
-
-  useEffect(() => {
-    if (!isNewGameOpen) return;
-    const id = window.setTimeout(() => newGameNameRef.current?.focus(), 0);
-    return () => window.clearTimeout(id);
-  }, [isNewGameOpen]);
-
-  function openNewGameDialog() {
-    setCreateError(null);
-    setNewGameType("soccer");
-    setNewGameName(PRESET_NAME_PLACEHOLDERS.soccer);
-    setIsNewGameOpen(true);
-  }
-
-  function closeNewGameDialog() {
-    setIsNewGameOpen(false);
-  }
-
-  async function createPreset(event: React.FormEvent) {
-    event.preventDefault();
-    if (creatingGameRef.current) return;
-    const trimmedName = newGameName.trim();
-    if (!trimmedName) return;
-    creatingGameRef.current = true;
-    setCreatingGame(true);
-    setError(null);
-    try {
-      const response = await presetApi.create(trimmedName, newGameType);
-      setIsNewGameOpen(false);
-      navigate(`/dash/presets/${response.preset.id}`);
-    } catch (err) {
-      setCreateError(err instanceof Error ? err.message : "Could not create game");
-    } finally {
-      creatingGameRef.current = false;
-      setCreatingGame(false);
-    }
-  }
-
-  async function manageGame(preset: PresetListItem, action: "duplicate" | "delete") {
-    if (cardBusy) return;
-    if (action === "delete" && !window.confirm(`Delete “${preset.name}”? Its output URL will stop working.`)) return;
-    setCardBusy(preset.id);
-    try {
-      if (action === "duplicate") {
-        const result = await presetApi.duplicate(preset.id);
-        void navigate(`/dash/presets/${result.preset.id}`);
-      } else {
-        await presetApi.remove(preset.id, preset.revision);
-        await load();
-        dispatchPresetDeleted({ id: preset.id, publicId: preset.publicId, revision: preset.revision });
-      }
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Could not update game");
-    } finally {
-      setCardBusy(null);
-    }
-  }
-
-  if (loading) return <PageSkeleton variant="games" title="Games" />;
-
-  return (
-    <>
-      <div className="page-title">
-        <h1>Games</h1>
-      </div>
-      {error ? (
-        <div className="error" role="alert">
-          {error}
-        </div>
-      ) : null}
-      <section className="preset-grid game-card-grid">
-        <button className="preset-card preset-card-new" type="button" onClick={openNewGameDialog}>
-          <span className="new-game-card-icon" aria-hidden="true">
-            <Plus size={22} />
-          </span>
-          <span className="new-game-card-copy">
-            <h2>New Game</h2>
-            <p>Soccer / Church</p>
-          </span>
-        </button>
-        {presets.map((preset) => (
-          <article className="preset-card game-card" key={preset.id}>
-            <div className="game-card-body">
-              <div className="game-card-meta">
-                <span>{preset.type === "soccer" ? "Soccer" : preset.type}</span>
-                <span>{formatOverlayClientCount(preset.overlayClientCount || 0)}</span>
-              </div>
-              <h2>
-                <Link to={`/dash/presets/${preset.id}`} aria-label={`Open ${preset.name}`}>
-                  {preset.name}
-                </Link>
-              </h2>
-              <div className="control-row game-card-actions">
-                <CopyButton value={`${window.location.origin}/overlay/${preset.publicId}`} onError={setError} />
-                <a className="button" href={`/overlay-test/${preset.publicId}`} target="_blank" rel="noreferrer">
-                  <ExternalLink size={14} /> Test output
-                </a>
-              </div>
-            </div>
-            <ActionMenu label={`${preset.name} actions`}>
-              <button className="button" disabled={cardBusy === preset.id} onClick={() => void manageGame(preset, "duplicate")}>
-                <Copy size={14} />
-                Duplicate
-              </button>
-              <button className="button danger" disabled={cardBusy === preset.id} onClick={() => void manageGame(preset, "delete")}>
-                <Trash2 size={14} />
-                Delete
-              </button>
-            </ActionMenu>
-          </article>
-        ))}
-      </section>
-      {isNewGameOpen ? (
-        <ModalLayer initialFocusRef={newGameNameRef} onClose={closeNewGameDialog}>
-          <form className="prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="new-game-dialog-title" onSubmit={createPreset}>
-            <h2 id="new-game-dialog-title">New game</h2>
-            {createError ? (
-              <div className="error" role="alert">
-                {createError}
-              </div>
-            ) : null}
-            <label className="field">
-              <span>Game type</span>
-              <select
-                className="number-input"
-                value={newGameType}
-                disabled={creatingGame}
-                onChange={(event) => {
-                  const nextType = event.target.value as PresetType;
-                  setNewGameType(nextType);
-                  setNewGameName(PRESET_NAME_PLACEHOLDERS[nextType]);
-                }}
-              >
-                <option value="soccer">Soccer</option>
-                <option value="church">Church</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Game name</span>
-              <input
-                ref={newGameNameRef}
-                value={newGameName}
-                disabled={creatingGame}
-                onChange={(event) => setNewGameName(event.target.value)}
-                placeholder={PRESET_NAME_PLACEHOLDERS[newGameType]}
-              />
-            </label>
-            <div className="control-row prompt-actions">
-              <button className="button" type="button" onClick={closeNewGameDialog} disabled={creatingGame}>
-                Cancel
-              </button>
-              <button className="button primary" type="submit" disabled={creatingGame || !newGameName.trim()}>
-                {creatingGame ? "Creating..." : "Create game"}
-              </button>
-            </div>
-          </form>
-        </ModalLayer>
-      ) : null}
-    </>
-  );
-}
-
 export function TeamsLibrary() {
   const [loading, setLoading] = useState(true);
   const [teams, setTeams] = useState<TeamLibraryEntry[]>([]);
   const [media, setMedia] = useState<MediaItem[]>([]);
+  const [mediaStatus, setMediaStatus] = useState<"loading" | "ready" | "failed">("loading");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [draft, setDraft] = useState<TeamLibraryEntry | null>(null);
   const [deletingTeamIds, setDeletingTeamIds] = useState<Set<string>>(() => new Set());
@@ -1306,6 +1022,7 @@ export function TeamsLibrary() {
   if (!teamSaveQueueRef.current) teamSaveQueueRef.current = new KeyedSerialTaskQueue();
   const teamsMountedRef = useRef(true);
   const loadGenerationRef = useRef(0);
+  const mediaLoadGenerationRef = useRef(0);
   const pendingTeamIdsRef = useRef(new Set<string>());
   const teamSaveDebouncerRef = useRef<KeyedDebouncer | null>(null);
   if (!teamSaveDebouncerRef.current) teamSaveDebouncerRef.current = new KeyedDebouncer(500);
@@ -1318,6 +1035,8 @@ export function TeamsLibrary() {
   const load = useCallback(async (signal?: AbortSignal) => {
     const generation = loadGenerationRef.current + 1;
     loadGenerationRef.current = generation;
+    const mediaGeneration = ++mediaLoadGenerationRef.current;
+    setMediaStatus("loading");
     // Optional images must not delay the primary team editor or reject unhandled.
     const mediaRequest = mediaApi.list(signal).then(
       (response) => ({ ok: true as const, response }),
@@ -1353,10 +1072,25 @@ export function TeamsLibrary() {
       setError(null);
     }
     const mediaResult = await mediaRequest;
-    if (signal?.aborted || generation !== loadGenerationRef.current) return;
-    if (mediaResult.ok) setMedia(mediaResult.response.media);
-    else setError((current) => current ?? "Teams loaded, but the media library could not be loaded.");
+    if (signal?.aborted || !teamsMountedRef.current || mediaGeneration !== mediaLoadGenerationRef.current) return;
+    if (mediaResult.ok) {
+      setMedia((current) => mergeMediaItems(mediaResult.response.media, current));
+      setMediaStatus("ready");
+    } else setMediaStatus("failed");
   }, []);
+
+  async function retryMedia() {
+    const generation = ++mediaLoadGenerationRef.current;
+    setMediaStatus("loading");
+    try {
+      const result = await mediaApi.list();
+      if (!teamsMountedRef.current || mediaLoadGenerationRef.current !== generation) return;
+      setMedia((current) => mergeMediaItems(result.media, current));
+      setMediaStatus("ready");
+    } catch {
+      if (teamsMountedRef.current && mediaLoadGenerationRef.current === generation) setMediaStatus("failed");
+    }
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1368,6 +1102,16 @@ export function TeamsLibrary() {
     });
     return () => controller.abort();
   }, [load]);
+
+  useEffect(() => {
+    const uploaded = (event: Event) => {
+      const item = (event as CustomEvent<MediaItem>).detail;
+      setMedia((current) => mergeMediaItems([item], current));
+      setMediaStatus("ready");
+    };
+    window.addEventListener(MEDIA_UPLOADED_EVENT, uploaded);
+    return () => window.removeEventListener(MEDIA_UPLOADED_EVENT, uploaded);
+  }, []);
 
   useEffect(() => {
     setDraft((current) => {
@@ -1452,6 +1196,22 @@ export function TeamsLibrary() {
     void teamSaveQueueRef.current?.run(team.id, () => persistTeam(team, revision));
   }
 
+  function retryTeamSave() {
+    const team = draftRef.current;
+    if (!team || conflictedTeamIdsRef.current.has(team.id) || !pendingTeamIdsRef.current.has(team.id)) return;
+    const revision = latestTeamSaveRevisionRef.current[team.id];
+    if (revision === undefined) return;
+    setError(null);
+    setSaveStatuses((current) => ({ ...current, [team.id]: "saving" }));
+    teamSaveDebouncerRef.current?.cancel(team.id);
+    enqueueTeamSave(structuredClone(team), revision);
+  }
+
+  function discardTeamEdits() {
+    if (pendingTeamIdsRef.current.size > 0 && !window.confirm("Discard unsaved team edits and reload saved teams?")) return;
+    void load().catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not reload teams"));
+  }
+
   async function createTeam() {
     const name = await prompt({
       title: "New team",
@@ -1463,13 +1223,15 @@ export function TeamsLibrary() {
     if (!trimmedName) return;
     const displayName = titleCaseFirst(trimmedName);
     setError(null);
+    // An in-flight library load must not select an older team while this
+    // creation is pending. The new team becomes the active editor on success.
+    loadGenerationRef.current += 1;
     try {
       const response = await teamApi.create({
         fullName: displayName,
         shortName: makeAbbreviation(displayName),
         abbreviation: makeAbbreviation(displayName)
       });
-      loadGenerationRef.current += 1;
       teamsRef.current = [response.team, ...teamsRef.current];
       serverTeamRevisionRef.current[response.team.id] = response.team.revision;
       const nextDraft = structuredClone(response.team);
@@ -1569,12 +1331,27 @@ export function TeamsLibrary() {
       {error ? (
         <div className="error" role="alert">
           <span>{error}</span>
-          <button
-            className="button"
-            type="button"
-            onClick={() => void load().catch((err) => setError(err instanceof Error ? err.message : "Could not reload teams"))}
-          >
-            Reload teams
+          {draft && pendingTeamIdsRef.current.has(draft.id) && !conflictedTeamIdsRef.current.has(draft.id) ? (
+            <button className="button" type="button" onClick={retryTeamSave}>
+              Retry save
+            </button>
+          ) : null}
+          <button className="button" type="button" onClick={discardTeamEdits}>
+            {pendingTeamIdsRef.current.size ? "Discard edits and reload" : "Retry loading"}
+          </button>
+        </div>
+      ) : null}
+      {mediaStatus === "loading" ? (
+        <p className="muted" role="status">
+          Loading saved logos…
+        </p>
+      ) : null}
+      {mediaStatus === "ready" && media.length === 0 ? <p className="muted">No saved logos yet.</p> : null}
+      {mediaStatus === "failed" ? (
+        <div className="error" role="alert">
+          Saved logos could not be loaded.{" "}
+          <button className="button" type="button" onClick={() => void retryMedia()}>
+            Retry logos
           </button>
         </div>
       ) : null}
@@ -1652,6 +1429,8 @@ export function TeamsLibrary() {
 
 export function PresetEditor() {
   const { presetId } = useParams();
+  const user = useContext(AuthContext)?.user;
+  const userId = user?.id;
   const navigate = useNavigate();
   const prompt = usePromptDialog();
   const [preset, setPreset] = useState<PresetSummary | null>(null);
@@ -1659,6 +1438,10 @@ export function PresetEditor() {
   const controlTimeMs = useControlTime(preset?.serverTimeMs, null);
   const [media, setMedia] = useState<MediaItem[]>([]);
   const [teams, setTeams] = useState<TeamLibraryEntry[]>([]);
+  const [optionalCatalogStatus, setOptionalCatalogStatus] = useState<{ media: "loading" | "ready" | "failed"; teams: "loading" | "ready" | "failed" }>({
+    media: "loading",
+    teams: "loading"
+  });
   const [tab, setTab] = useState("live");
   const [soccerPreviewSurface, setSoccerPreviewSurface] = useState<SoccerState["soccerPackage"]["surface"]>("checker");
   const [connection, setConnection] = useState<"connecting" | "connected" | "disconnected">("connecting");
@@ -1736,6 +1519,16 @@ export function PresetEditor() {
   }, [preset]);
 
   useEffect(() => {
+    const uploaded = (event: Event) => {
+      const item = (event as CustomEvent<MediaItem>).detail;
+      setMedia((current) => mergeMediaItems([item], current));
+      setOptionalCatalogStatus((current) => ({ ...current, media: "ready" }));
+    };
+    window.addEventListener(MEDIA_UPLOADED_EVENT, uploaded);
+    return () => window.removeEventListener(MEDIA_UPLOADED_EVENT, uploaded);
+  }, []);
+
+  useEffect(() => {
     if (!presetId) return;
     const requestedPresetId = presetId;
     const generation = routeGenerationRef.current + 1;
@@ -1748,7 +1541,7 @@ export function PresetEditor() {
     setAutosaveFailed(false);
     autosaveFailedRef.current = false;
     setNotice(null);
-    setActionKey(null);
+    setActionKey(userId ? (pendingActionKeys.get(`${userId}:${requestedPresetId}`) ?? null) : null);
     setDebugEvents(null);
     setError(null);
     setPresetDeleted(false);
@@ -1758,6 +1551,7 @@ export function PresetEditor() {
       replacePreset(null);
       setMedia([]);
       setTeams([]);
+      setOptionalCatalogStatus({ media: "loading", teams: "loading" });
     }
     const loadSaveSequence = localSaveSequenceRef.current;
     setPendingSoccerTextUpdate(null);
@@ -1796,11 +1590,12 @@ export function PresetEditor() {
       }
       const [mediaResult, teamsResult] = await optionalResults;
       if (controller.signal.aborted || routeGenerationRef.current !== generation) return;
-      if (mediaResult.status === "fulfilled") setMedia(mediaResult.value.media);
+      if (mediaResult.status === "fulfilled") setMedia((current) => mergeMediaItems(mediaResult.value.media, current));
       if (teamsResult.status === "fulfilled") setTeams(teamsResult.value.teams);
-
-      const optionalFailures = [mediaResult.status === "rejected" ? "media" : null, teamsResult.status === "rejected" ? "teams" : null].filter(Boolean);
-      if (optionalFailures.length > 0) setError(`Game loaded, but ${optionalFailures.join(" and ")} could not be loaded.`);
+      setOptionalCatalogStatus({
+        media: mediaResult.status === "fulfilled" ? "ready" : "failed",
+        teams: teamsResult.status === "fulfilled" ? "ready" : "failed"
+      });
     }
 
     void loadPreset().catch((err) => {
@@ -1817,7 +1612,7 @@ export function PresetEditor() {
       bufferedSocketPresetRef.current = null;
       void mutationQueueRef.current?.flush().catch(() => undefined);
     };
-  }, [presetId, reloadKey, replacePreset, resetHistory]);
+  }, [presetId, reloadKey, replacePreset, resetHistory, userId]);
 
   useEffect(() => {
     function beforeUnload(event: BeforeUnloadEvent) {
@@ -1849,8 +1644,9 @@ export function PresetEditor() {
   }, [preset, tab]);
 
   useEffect(() => {
-    if (preset?.state && isSoccerState(preset.state)) {
-      setSoccerPreviewSurface(preset.state.soccerPackage.surface);
+    const current = presetRef.current;
+    if (current?.state && isSoccerState(current.state)) {
+      setSoccerPreviewSurface(current.state.soccerPackage.surface);
     }
   }, [preset?.id]);
 
@@ -1900,6 +1696,7 @@ export function PresetEditor() {
       setAutosaveFailed(false);
       setMutationBusy(false);
       setRevisionConflict(false);
+      if (userId) pendingActionKeys.delete(`${userId}:${requestedPresetId}`);
       setActionKey(null);
       setDebugEvents(null);
       setNotice(null);
@@ -1994,7 +1791,7 @@ export function PresetEditor() {
       retry.stop();
       socket.disconnect();
     };
-  }, [presetId, reloadKey, replacePreset, resetHistory]);
+  }, [presetId, reloadKey, replacePreset, resetHistory, userId]);
 
   useEffect(() => {
     if (connection !== "disconnected") {
@@ -2199,10 +1996,10 @@ export function PresetEditor() {
     return (
       <div className="live-game-page">
         <div className="error" role="alert">
-          <h1>Game deleted</h1>
-          <p>This game was deleted in another session. Its editor and output have been closed.</p>
+          <h1>Production deleted</h1>
+          <p>This production was deleted in another session. Its editor and output have been closed.</p>
           <Link className="button" to="/dash">
-            Return to games
+            Return to productions
           </Link>
         </div>
       </div>
@@ -2309,7 +2106,7 @@ export function PresetEditor() {
       const response = await mutationQueueRef.current!.run(() => presetApi.duplicate(current.id));
       if (routeGenerationRef.current !== generation || presetRef.current?.id !== current.id) return;
       allowNextNavigationRef.current = true;
-      navigate(`/dash/presets/${response.preset.id}`);
+      void navigate(`/dash/presets/${response.preset.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not duplicate game");
     } finally {
@@ -2353,12 +2150,16 @@ export function PresetEditor() {
     if (!current || mutationBusyRef.current || revisionConflict || !requireSavedState()) return;
     if (!window.confirm("Rotate the action key? Existing Stream Deck and automation keys will stop working immediately.")) return;
     if (pendingSoccerTextUpdateRef.current) applyPendingSoccerTextUpdate();
+    const generation = routeGenerationRef.current;
+    const keyScope = `${userId ?? ""}:${current.id}`;
     mutationBusyRef.current = true;
     setMutationBusy(true);
     setError(null);
     setNotice(null);
     try {
       const response = await mutationQueueRef.current!.run(() => presetApi.actionKey(current.id));
+      pendingActionKeys.set(keyScope, response.actionKey);
+      if (routeGenerationRef.current !== generation || presetRef.current?.id !== current.id) return;
       if (response.preset) {
         const revision = getPresetRevision(response.preset);
         if (revision !== undefined) serverRevisionByPresetRef.current[current.id] = revision;
@@ -2366,10 +2167,35 @@ export function PresetEditor() {
       }
       setActionKey(response.actionKey);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not rotate action key");
+      if (routeGenerationRef.current === generation && presetRef.current?.id === current.id)
+        setError(err instanceof Error ? err.message : "Could not rotate action key");
     } finally {
-      mutationBusyRef.current = false;
-      setMutationBusy(false);
+      if (routeGenerationRef.current === generation && presetRef.current?.id === current.id) {
+        mutationBusyRef.current = false;
+        setMutationBusy(false);
+      }
+    }
+  }
+
+  async function retryOptionalCatalog(kind: "media" | "teams") {
+    const generation = routeGenerationRef.current;
+    const resourceId = presetRef.current?.id;
+    if (!resourceId) return;
+    setOptionalCatalogStatus((current) => ({ ...current, [kind]: "loading" }));
+    try {
+      if (kind === "media") {
+        const response = await mediaApi.list();
+        if (routeGenerationRef.current !== generation || presetRef.current?.id !== resourceId) return;
+        setMedia((current) => mergeMediaItems(response.media, current));
+      } else {
+        const response = await teamApi.list();
+        if (routeGenerationRef.current !== generation || presetRef.current?.id !== resourceId) return;
+        setTeams(response.teams);
+      }
+      setOptionalCatalogStatus((current) => ({ ...current, [kind]: "ready" }));
+    } catch {
+      if (routeGenerationRef.current === generation && presetRef.current?.id === resourceId)
+        setOptionalCatalogStatus((current) => ({ ...current, [kind]: "failed" }));
     }
   }
 
@@ -2446,6 +2272,37 @@ export function PresetEditor() {
         </button>
       </div>
 
+      {preset.type === "church" ? <StageLinkControls presetId={preset.id} publicId={preset.publicId} onError={setError} /> : null}
+
+      {optionalCatalogStatus.media === "loading" ? (
+        <p className="muted" role="status">
+          Loading media library…
+        </p>
+      ) : null}
+      {optionalCatalogStatus.media === "ready" && media.length === 0 ? <p className="muted">No saved media yet.</p> : null}
+      {optionalCatalogStatus.media === "failed" ? (
+        <div className="error" role="alert">
+          Media library could not be loaded.{" "}
+          <button className="button" type="button" onClick={() => void retryOptionalCatalog("media")}>
+            Retry media
+          </button>
+        </div>
+      ) : null}
+      {preset.type === "soccer" && optionalCatalogStatus.teams === "loading" ? (
+        <p className="muted" role="status">
+          Loading saved teams…
+        </p>
+      ) : null}
+      {preset.type === "soccer" && optionalCatalogStatus.teams === "ready" && teams.length === 0 ? <p className="muted">No saved teams yet.</p> : null}
+      {preset.type === "soccer" && optionalCatalogStatus.teams === "failed" ? (
+        <div className="error" role="alert">
+          Saved teams could not be loaded.{" "}
+          <button className="button" type="button" onClick={() => void retryOptionalCatalog("teams")}>
+            Retry teams
+          </button>
+        </div>
+      ) : null}
+
       {showConnectionWarning ? (
         <div className="error" role="alert">
           Backend or overlay WebSocket is disconnected. The overlay will keep showing its last known state.
@@ -2487,13 +2344,23 @@ export function PresetEditor() {
             onClick={() =>
               void navigator.clipboard
                 .writeText(actionKey)
-                .then(() => setNotice("Action key copied."))
+                .then(() => {
+                  pendingActionKeys.delete(`${userId ?? ""}:${preset.id}`);
+                  setNotice("Action key copied.");
+                })
                 .catch(() => setError("Could not copy action key."))
             }
           >
             <Copy size={14} /> Copy key
           </button>
-          <button className="button" type="button" onClick={() => setActionKey(null)}>
+          <button
+            className="button"
+            type="button"
+            onClick={() => {
+              pendingActionKeys.delete(`${userId ?? ""}:${preset.id}`);
+              setActionKey(null);
+            }}
+          >
             Dismiss
           </button>
         </div>
@@ -3060,314 +2927,6 @@ function SoccerGraphicFields({
   return null;
 }
 
-export function SyncedTimeInput({ seconds, disabled = false, onCommit }: { seconds: number; disabled?: boolean; onCommit: (seconds: number) => void }) {
-  const formatted = formatClock(seconds);
-  const [draft, setDraft] = useState(formatted);
-  const [invalid, setInvalid] = useState(false);
-  const focusedRef = useRef(false);
-  const editedRef = useRef(false);
-
-  useEffect(() => {
-    if (!focusedRef.current) {
-      setDraft(formatted);
-      setInvalid(false);
-    }
-  }, [formatted]);
-
-  return (
-    <input
-      value={draft}
-      disabled={disabled}
-      inputMode="numeric"
-      aria-invalid={invalid || undefined}
-      title={invalid ? "Enter seconds or a time in M:SS format" : undefined}
-      onFocus={() => {
-        focusedRef.current = true;
-        editedRef.current = false;
-      }}
-      onChange={(event) => {
-        editedRef.current = true;
-        setDraft(event.target.value);
-        setInvalid(false);
-      }}
-      onBlur={() => {
-        focusedRef.current = false;
-        if (!editedRef.current) {
-          setDraft(formatted);
-          setInvalid(false);
-          return;
-        }
-        const parsed = tryParseClockTime(draft);
-        if (parsed === null) {
-          setInvalid(true);
-          return;
-        }
-        setInvalid(false);
-        setDraft(formatClock(parsed));
-        onCommit(parsed);
-      }}
-    />
-  );
-}
-
-// Tick only the controls that display time, using the same monotonic server
-// anchor as the overlay. Stop scheduling once a finite timer has expired.
-function useControlTime(serverTimeMs: number | undefined, deadline: number | null) {
-  const anchor = useMemo(() => ({ server: serverTimeMs ?? Date.now(), received: performance.now() }), [serverTimeMs]);
-  const [, refresh] = useState(0);
-  useEffect(() => {
-    if (deadline === null) return;
-    let timer: number | undefined;
-    const schedule = () => {
-      const remaining = deadline - (anchor.server + performance.now() - anchor.received);
-      if (remaining <= 0) return;
-      timer = window.setTimeout(
-        () => {
-          refresh((value) => value + 1);
-          schedule();
-        },
-        Math.min(250, remaining)
-      );
-    };
-    schedule();
-    return () => window.clearTimeout(timer);
-  }, [anchor, deadline]);
-  return anchor.server + performance.now() - anchor.received;
-}
-
-export function SoccerCountdownPanel({
-  state,
-  serverTimeMs,
-  updatePackage,
-  runAction
-}: {
-  state: SoccerState;
-  serverTimeMs?: number;
-  updatePackage: (patch: Partial<SoccerState["soccerPackage"]>) => void;
-  runAction: (action: string, payload?: Record<string, unknown>) => Promise<void>;
-}) {
-  const countdown = state.soccerPackage.countdown;
-  const deadline = countdown.running && countdown.startedAtMs !== null ? countdown.startedAtMs + countdown.seconds * 1000 : null;
-  const now = useControlTime(serverTimeMs, deadline);
-  const running = countdown.running && (deadline === null || now < deadline);
-
-  function updateCountdown(patch: Partial<SoccerState["soccerPackage"]["countdown"]>) {
-    updatePackage({ countdown: { ...state.soccerPackage.countdown, ...patch } });
-  }
-
-  function startPresetCountdown(seconds: number) {
-    void runAction("countdown-start", { durationSeconds: seconds });
-  }
-
-  return (
-    <section className="control-section countdown-panel">
-      <h2>Countdown</h2>
-      <div className="form-grid">
-        <div className="control-row">
-          <button
-            className="button primary icon-toggle"
-            type="button"
-            aria-label={running ? "Stop countdown" : "Start countdown"}
-            title={running ? "Stop countdown" : "Start countdown"}
-            onClick={() => void runAction("countdown-toggle")}
-          >
-            {running ? <Pause size={14} fill="currentColor" strokeWidth={0} /> : <Play size={14} fill="currentColor" strokeWidth={0} />}
-          </button>
-          <button className="button" type="button" onClick={() => startPresetCountdown(300)}>
-            5:00
-          </button>
-          <button className="button" type="button" onClick={() => startPresetCountdown(600)}>
-            10:00
-          </button>
-          <button className="button" type="button" onClick={() => void runAction("countdown-reset")}>
-            Reset
-          </button>
-        </div>
-        <div className="two-col">
-          <label className="field">
-            <span>Custom length</span>
-            <SyncedTimeInput
-              seconds={state.soccerPackage.countdown.resetSeconds}
-              onCommit={(seconds) => {
-                updateCountdown({ seconds, resetSeconds: seconds, running: false, startedAtMs: null });
-              }}
-            />
-          </label>
-          <label className="field">
-            <span>Mode</span>
-            <select
-              value={state.soccerPackage.countdown.mode}
-              onChange={(event) => updateCountdown({ mode: event.target.value as SoccerState["soccerPackage"]["countdown"]["mode"] })}
-            >
-              <option value="full">Full page</option>
-              <option value="small">Small</option>
-            </select>
-          </label>
-        </div>
-        <label className="field">
-          <span>Position</span>
-          <select
-            value={state.soccerPackage.countdown.position}
-            disabled={state.soccerPackage.countdown.mode !== "small"}
-            onChange={(event) => updateCountdown({ position: event.target.value as PositionPreset })}
-          >
-            {positionOptions.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="field">
-          <span>Countdown label</span>
-          <input value={state.soccerPackage.countdown.label} onChange={(event) => updateCountdown({ label: event.target.value })} />
-        </label>
-      </div>
-    </section>
-  );
-}
-
-export function SoccerScoreClockPanel({
-  state,
-  serverTimeMs,
-  updateClock,
-  runAction
-}: {
-  state: SoccerState;
-  serverTimeMs?: number;
-  updateClock: (patch: Partial<SoccerState["clock"]>) => void;
-  runAction: (action: string, payload?: Record<string, unknown>) => Promise<void>;
-}) {
-  const clock = state.clock;
-  const distance = clock.mode === "up" ? clock.stopAtSeconds - clock.baseSeconds : clock.baseSeconds - clock.stopAtSeconds;
-  const deadline = clock.running ? (clock.stopAtEnabled && clock.startedAtMs !== null ? clock.startedAtMs + Math.max(0, distance) * 1000 : Infinity) : null;
-  const now = useControlTime(serverTimeMs, deadline);
-  const running = clock.running && !clockIsAtStop(clock, now);
-  return (
-    <div className="score-clock-panel">
-      <section className="score-clock-section">
-        <h2>Score</h2>
-        <div className="two-col">
-          <ScoreControls
-            label={state.home.abbreviation}
-            score={state.score.home}
-            plus={() => runAction("home-score-plus")}
-            minus={() => runAction("home-score-minus")}
-          />
-          <ScoreControls
-            label={state.away.abbreviation}
-            score={state.score.away}
-            plus={() => runAction("away-score-plus")}
-            minus={() => runAction("away-score-minus")}
-          />
-        </div>
-      </section>
-      <section className="score-clock-section">
-        <h2>Clock</h2>
-        <div className="control-row">
-          <button
-            className="button primary icon-toggle"
-            type="button"
-            aria-label={running ? "Pause clock" : "Start clock"}
-            title={running ? "Pause clock" : "Start clock"}
-            onClick={() => runAction("clock-toggle")}
-          >
-            {running ? <Pause size={14} fill="currentColor" strokeWidth={0} /> : <Play size={14} fill="currentColor" strokeWidth={0} />}
-          </button>
-          <button className="button" type="button" onClick={() => runAction("clock-reset")}>
-            <RotateCcw size={15} /> Reset
-          </button>
-        </div>
-        <div className="form-grid">
-          <label className="field">
-            <span>Manual time</span>
-            <SyncedTimeInput seconds={computeClockSeconds(state.clock, now)} onCommit={(seconds) => updateClock(setClockSeconds(state.clock, seconds))} />
-          </label>
-          <div className="two-col">
-            <label className="field">
-              <span>Mode</span>
-              <select
-                value={state.clock.mode}
-                title="Changing direction pauses the clock at its current time"
-                onChange={(event) => {
-                  const mode = event.target.value as "up" | "down";
-                  const paused = pauseClock(state.clock, now);
-                  const validStop = mode === "up" ? paused.stopAtSeconds >= paused.baseSeconds : paused.stopAtSeconds <= paused.baseSeconds;
-                  updateClock({ ...paused, mode, stopAtEnabled: paused.stopAtEnabled && validStop });
-                }}
-              >
-                <option value="up">Count up</option>
-                <option value="down">Count down</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Period</span>
-              <input value={state.clock.periodLabel} onChange={(event) => updateClock({ periodLabel: event.target.value })} />
-            </label>
-          </div>
-          <div className={`clock-toggle-option ${state.clock.stopAtEnabled ? "" : "is-disabled"}`}>
-            <div className="clock-toggle-inline">
-              <label className="custom-checkbox-control" aria-label="Enable stop at">
-                <input type="checkbox" checked={state.clock.stopAtEnabled} onChange={(event) => updateClock({ stopAtEnabled: event.target.checked })} />
-                <span className="custom-checkbox-glyph" aria-hidden="true">
-                  <Check size={10} />
-                </span>
-              </label>
-              <label className="field">
-                <span>Stop at</span>
-                <SyncedTimeInput
-                  seconds={state.clock.stopAtSeconds}
-                  disabled={!state.clock.stopAtEnabled}
-                  onCommit={(seconds) => updateClock({ stopAtSeconds: seconds })}
-                />
-              </label>
-            </div>
-          </div>
-          <div className={`clock-toggle-option ${state.clock.showStoppage ? "" : "is-disabled"}`}>
-            <div className="clock-toggle-inline">
-              <label className="custom-checkbox-control" aria-label="Enable stoppage time">
-                <input type="checkbox" checked={state.clock.showStoppage} onChange={(event) => updateClock({ showStoppage: event.target.checked })} />
-                <span className="custom-checkbox-glyph" aria-hidden="true">
-                  <Check size={10} />
-                </span>
-              </label>
-              <label className="field">
-                <span>Stoppage minutes</span>
-                <input
-                  type="number"
-                  min="0"
-                  value={state.clock.stoppageMinutes}
-                  disabled={!state.clock.showStoppage}
-                  onChange={(event) => updateClock({ stoppageMinutes: Math.max(0, Number(event.target.value)) })}
-                />
-              </label>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function ScoreControls({ label, score, plus, minus }: { label: string; score: number; plus: () => void; minus: () => void }) {
-  return (
-    <div className="score-control">
-      <div className="score-control-row">
-        <h3>{label}</h3>
-        <strong>{score}</strong>
-      </div>
-      <div className="score-control-actions">
-        <button className="button primary" type="button" onClick={plus} aria-label={`Add point to ${label}`}>
-          <Plus size={16} /> 1
-        </button>
-        <button className="button" type="button" onClick={minus} aria-label={`Subtract point from ${label}`}>
-          −1
-        </button>
-      </div>
-    </div>
-  );
-}
-
 function SoccerOperationsPanel({
   state,
   serverTimeMs,
@@ -3644,6 +3203,7 @@ export function TeamFields({
         patch.secondaryColor = extractedColors.secondaryColor;
       }
       onChange(patch);
+      announceMediaUpload(response.media);
     } catch (err) {
       if (mountedRef.current && uploadGenerationRef.current === uploadGeneration && !controller.signal.aborted) {
         setLogoError(err instanceof Error ? err.message : "Logo upload failed");
@@ -3726,21 +3286,12 @@ export function TeamFields({
             {logoError}
           </p>
         ) : null}
-        <select
-          aria-label="Choose existing logo from media library"
-          value={team.logoMediaId || ""}
-          onChange={(event) => {
-            const selected = media.find((item) => item.id === event.target.value);
-            onChange({ logoMediaId: selected?.id ?? "", logoUrl: selected?.url ?? "" });
-          }}
-        >
-          <option value="">No logo</option>
-          {media.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.originalFilename}
-            </option>
-          ))}
-        </select>
+        <MediaPicker
+          label="Choose existing logo from media library"
+          selectedId={team.logoMediaId}
+          initialItems={media}
+          onSelect={(item) => onChange({ logoMediaId: item?.id ?? "", logoUrl: item?.url ?? "" })}
+        />
       </div>
       {team.logoUrl ? (
         <details className="image-crop-controls advanced-section">
@@ -3861,8 +3412,9 @@ export function ChurchControls({
   runAction: (action: string, payload?: Record<string, unknown>) => Promise<void>;
 }) {
   const onAir = churchOnAirSlide(state);
-  const selected = state.slides.find((slide) => slide.id === state.selectedSlideId) || state.slides[0];
+  const selected = state.slides.find((slide) => slide.id === state.selectedSlideId);
   const [countdownSeconds, setCountdownSeconds] = useState(5 * 60);
+  const [countdownValid, setCountdownValid] = useState(true);
   const timeAnchor = useMemo(() => ({ server: serverTimeMs ?? Date.now(), received: performance.now() }), [serverTimeMs]);
   const [, refreshExpiry] = useState(0);
   const now = timeAnchor.server + Math.max(0, performance.now() - timeAnchor.received);
@@ -3912,12 +3464,20 @@ export function ChurchControls({
           </label>
           <label className="field">
             <span>Countdown length</span>
-            <SyncedTimeInput seconds={countdownSeconds} onCommit={(seconds) => setCountdownSeconds(Math.min(3_600, Math.max(1, seconds)))} />
+            <SyncedTimeInput
+              seconds={countdownSeconds}
+              minSeconds={1}
+              maxSeconds={3_600}
+              describedBy="church-countdown-guidance"
+              onValidityChange={setCountdownValid}
+              onCommit={setCountdownSeconds}
+            />
           </label>
+          <small id="church-countdown-guidance">1 second to 60 minutes. Use M:SS.</small>
           <button
             className="button"
             type="button"
-            disabled={!state.elements.countdown.visible}
+            disabled={!state.elements.countdown.visible || !countdownValid}
             onClick={() => void runAction("trigger-countdown", { title: "Service begins in", durationSeconds: countdownSeconds })}
           >
             {countdownActive ? "Stop countdown" : "Start countdown"}
@@ -4254,371 +3814,6 @@ function teamLibraryToSoccerTeam(team: TeamLibraryEntry): SoccerState["home"] {
   return soccerTeam;
 }
 
-export function MediaLibrary() {
-  const [loading, setLoading] = useState(true);
-  const [media, setMedia] = useState<MediaItem[]>([]);
-  const [nextCursor, setNextCursor] = useState<string | null>(null);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [deletingIds, setDeletingIds] = useState<Set<string>>(() => new Set());
-  const uploadingRef = useRef(false);
-  const loadingMoreRef = useRef(false);
-  const mediaMutationsRef = useRef(new Set<string>());
-  const loadGenerationRef = useRef(0);
-  const componentAbortRef = useRef<AbortController | null>(null);
-
-  const load = useCallback(async (signal?: AbortSignal, failureMessage = "Could not load media") => {
-    const generation = ++loadGenerationRef.current;
-    setError(null);
-    try {
-      const response = await mediaApi.list(signal);
-      if (!signal?.aborted && loadGenerationRef.current === generation) {
-        setMedia(response.media);
-        setNextCursor(response.nextCursor);
-      }
-    } catch (err) {
-      if (!signal?.aborted && loadGenerationRef.current === generation) {
-        setError(`${failureMessage}${err instanceof Error ? `: ${err.message}` : "."}`);
-      }
-    } finally {
-      if (!signal?.aborted && loadGenerationRef.current === generation) setLoading(false);
-    }
-  }, []);
-
-  async function loadMore() {
-    const controller = componentAbortRef.current;
-    if (!controller || controller.signal.aborted || !nextCursor || loadingMoreRef.current) return;
-    const generation = loadGenerationRef.current;
-    loadingMoreRef.current = true;
-    setLoadingMore(true);
-    setError(null);
-    try {
-      const response = await mediaApi.list(controller.signal, nextCursor);
-      if (!controller.signal.aborted && generation === loadGenerationRef.current) {
-        setMedia((current) => [...current, ...response.media.filter((item) => !current.some((existing) => existing.id === item.id))]);
-        setNextCursor(response.nextCursor);
-      }
-    } catch (err) {
-      if (!controller.signal.aborted && generation === loadGenerationRef.current) setError(err instanceof Error ? err.message : "Could not load more media");
-    } finally {
-      loadingMoreRef.current = false;
-      if (!controller.signal.aborted) setLoadingMore(false);
-    }
-  }
-
-  useEffect(() => {
-    const controller = new AbortController();
-    componentAbortRef.current = controller;
-    void load(controller.signal);
-    return () => {
-      controller.abort();
-      if (componentAbortRef.current === controller) componentAbortRef.current = null;
-    };
-  }, [load]);
-
-  async function uploadFiles(files: FileList | File[]) {
-    if (uploadingRef.current) return;
-    setError(null);
-    const selectedFiles = Array.from(files);
-    if (selectedFiles.length === 0) return;
-    if (selectedFiles.length > 20) {
-      setError("Choose at most 20 files per upload batch.");
-      return;
-    }
-    const controller = componentAbortRef.current;
-    if (!controller || controller.signal.aborted) return;
-    uploadingRef.current = true;
-    setUploading(true);
-    try {
-      const results: PromiseSettledResult<{ media: MediaItem }>[] = [];
-      for (let index = 0; index < selectedFiles.length && !controller.signal.aborted; index += 2) {
-        const batch = await Promise.allSettled(selectedFiles.slice(index, index + 2).map((file) => mediaApi.upload(file, controller.signal)));
-        results.push(...batch);
-        if (controller.signal.aborted) return;
-        const uploaded = batch.flatMap((result) => (result.status === "fulfilled" ? [result.value.media] : []));
-        if (uploaded.length > 0) {
-          ++loadGenerationRef.current;
-          setMedia((current) => [...uploaded, ...current.filter((item) => !uploaded.some((added) => added.id === item.id))]);
-        }
-      }
-      if (controller.signal.aborted) return;
-      await load(controller.signal, "Uploads finished, but the media library could not be refreshed");
-      if (controller.signal.aborted) return;
-      const failures = results.filter((result) => result.status === "rejected");
-      if (failures.length > 0) setError(`${failures.length} of ${selectedFiles.length} uploads failed. Successful uploads were kept.`);
-    } finally {
-      uploadingRef.current = false;
-      if (!controller.signal.aborted) setUploading(false);
-    }
-  }
-
-  async function remove(id: string) {
-    if (mediaMutationsRef.current.has(id)) return;
-    if (!window.confirm("Delete this media item? Existing graphics that use it may lose their image.")) return;
-    const controller = componentAbortRef.current;
-    if (!controller || controller.signal.aborted) return;
-    mediaMutationsRef.current.add(id);
-    setDeletingIds((current) => new Set(current).add(id));
-    setError(null);
-    try {
-      await mediaApi.remove(id, controller.signal);
-      if (controller.signal.aborted) return;
-      ++loadGenerationRef.current;
-      setMedia((current) => current.filter((item) => item.id !== id));
-      await load(controller.signal, "Media deleted, but the library could not be refreshed");
-    } catch (err) {
-      if (!controller.signal.aborted) setError(err instanceof Error ? err.message : "Could not delete media");
-    } finally {
-      mediaMutationsRef.current.delete(id);
-      if (!controller.signal.aborted) {
-        setDeletingIds((current) => {
-          const next = new Set(current);
-          next.delete(id);
-          return next;
-        });
-      }
-    }
-  }
-
-  return (
-    <>
-      <div className="page-title">
-        <div>
-          <h1>Media</h1>
-        </div>
-      </div>
-      {error ? (
-        <div className="error" role="alert">
-          {error}{" "}
-          <button
-            className="button"
-            type="button"
-            onClick={() => {
-              setLoading(true);
-              void load(componentAbortRef.current?.signal);
-            }}
-          >
-            Retry media
-          </button>
-        </div>
-      ) : null}
-      <label
-        className={`dropzone ${uploading ? "disabled" : ""}`}
-        aria-disabled={uploading}
-        onDragOver={(event) => {
-          if (!uploadingRef.current) event.preventDefault();
-        }}
-        onDrop={(event) => {
-          event.preventDefault();
-          if (uploadingRef.current) return;
-          void uploadFiles(event.dataTransfer.files);
-        }}
-      >
-        <Upload size={28} />
-        <strong>{uploading ? "Uploading images..." : "Drop images here"}</strong>
-        <span className="muted">{uploading ? "Wait for this batch to finish" : "PNG, JPG, SVG, or WebP"}</span>
-        <input
-          type="file"
-          accept="image/png,image/jpeg,image/svg+xml,image/webp"
-          multiple
-          disabled={uploading}
-          className="visually-hidden-file-input"
-          aria-label="Upload media files"
-          onChange={(event) => {
-            const files = event.currentTarget.files ? Array.from(event.currentTarget.files) : [];
-            event.currentTarget.value = "";
-            if (files.length > 0) void uploadFiles(files);
-          }}
-        />
-      </label>
-      {loading ? <PageSkeleton variant="media" contentOnly /> : null}
-      <section className="media-grid" style={{ marginTop: loading ? 0 : 18 }}>
-        {media.map((item) => (
-          <article className="media-card" key={item.id}>
-            <div className="media-thumb">
-              <img src={mediaApi.mediaUrl(item.thumbnailUrl || item.url)} alt={item.originalFilename} loading="lazy" decoding="async" />
-            </div>
-            <footer>
-              <strong title={item.originalFilename}>{item.originalFilename}</strong>
-              {item.width && item.height ? (
-                <span className="muted">
-                  {item.width} × {item.height}
-                </span>
-              ) : null}
-              <button className="button danger" type="button" disabled={deletingIds.has(item.id)} onClick={() => void remove(item.id)}>
-                <Trash2 size={16} /> {deletingIds.has(item.id) ? "Deleting..." : "Delete"}
-              </button>
-            </footer>
-          </article>
-        ))}
-      </section>
-      {nextCursor ? (
-        <button className="button" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
-          {loadingMore ? "Loading…" : "Load more"}
-        </button>
-      ) : null}
-    </>
-  );
-}
-
-export function OverlayPage({ test }: { test: boolean }) {
-  const { overlayId } = useParams();
-  const [searchParams] = useSearchParams();
-  const [overlay, setOverlay] = useState<PresetSummary | null>(null);
-  const [connection, setConnection] = useState<"connecting" | "connected" | "disconnected">("connecting");
-  const [error, setError] = useState<string | null>(null);
-  const client = searchParams.get("client") === "preview" ? "preview" : "overlay";
-
-  useLayoutEffect(() => {
-    document.documentElement.classList.add("overlay-route-root");
-    document.body.classList.add("overlay-route-body");
-    return () => {
-      document.documentElement.classList.remove("overlay-route-root");
-      document.body.classList.remove("overlay-route-body");
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!overlayId) return;
-    const requestedOverlayId = overlayId;
-    const controller = new AbortController();
-    let active = true;
-    let deleted = false;
-    let socketHasUpdated = false;
-    let latestRevision = -1;
-    setOverlay(null);
-    setError(null);
-    setConnection("connecting");
-
-    void overlayApi
-      .get(requestedOverlayId, controller.signal)
-      .then((response) => {
-        if (!active || deleted || controller.signal.aborted || response.overlay.publicId !== requestedOverlayId) return;
-        const responseRevision = getPresetRevision(response.overlay) ?? -1;
-        if (socketHasUpdated && responseRevision <= latestRevision) return;
-        if (socketHasUpdated && responseRevision === -1) return;
-        latestRevision = Math.max(latestRevision, responseRevision);
-        setError(null);
-        setOverlay(response.overlay);
-      })
-      .catch((err) => {
-        if (!active || controller.signal.aborted || socketHasUpdated) return;
-        setError(err instanceof Error ? err.message : "Could not load overlay");
-      });
-    const socket = io(WS_URL, {
-      autoConnect: false,
-      transports: ["polling", "websocket"],
-      tryAllTransports: true,
-      auth: { role: "overlay", overlayId, client, apiVersion: OPENOVERLAY_API_VERSION, realtimeVersion: OPENOVERLAY_REALTIME_VERSION },
-      query: { role: "overlay", overlayId, client, apiVersion: OPENOVERLAY_API_VERSION, realtimeVersion: OPENOVERLAY_REALTIME_VERSION }
-    });
-    const retry = new RealtimeRetry(() => socket.connect());
-    queueMicrotask(() => {
-      if (active && !deleted) socket.connect();
-    });
-    function enterDeletedState() {
-      if (!active || deleted) return;
-      deleted = true;
-      controller.abort();
-      setOverlay(null);
-      setError("This overlay was deleted and is no longer available.");
-      setConnection("disconnected");
-      retry.stop();
-      socket.disconnect();
-    }
-    socket.on("connect", () => {
-      if (active) setConnection("connected");
-    });
-    socket.on("disconnect", (reason) => {
-      if (!active || deleted) return;
-      setConnection("disconnected");
-      retry.disconnected(reason);
-    });
-    socket.on("connect_error", () => {
-      if (active) setConnection("disconnected");
-    });
-    socket.on("state:update", (payload: unknown) => {
-      if (!active || deleted || !isPreset(payload) || payload.publicId !== requestedOverlayId) return;
-      const incomingRevision = getPresetRevision(payload);
-      if (incomingRevision === undefined) return;
-      if (incomingRevision < latestRevision) return;
-      retry.receivedState();
-      socketHasUpdated = true;
-      latestRevision = incomingRevision;
-      setError(null);
-      setOverlay(payload);
-    });
-    socket.on("preset:deleted", (payload: unknown) => {
-      if (!active || deleted || !isPresetDeletedEvent(payload) || payload.publicId !== requestedOverlayId) return;
-      enterDeletedState();
-    });
-    socket.on("error:message", (payload: unknown) => {
-      if (!active || deleted || !isRealtimeErrorMessage(payload)) return;
-      if (payload.error === "Overlay not found") enterDeletedState();
-      if (payload.error === "Incompatible OpenOverlay API or realtime version" || payload.error === "Authentication required") {
-        retry.stop();
-        setError(payload.error);
-      }
-    });
-    return () => {
-      active = false;
-      retry.stop();
-      controller.abort();
-      socket.disconnect();
-    };
-  }, [client, overlayId]);
-
-  if (test) {
-    return (
-      <div className="overlay-test-page">
-        <div className="page-title">
-          <div>
-            <h1>Overlay test</h1>
-            <p className="muted">
-              {overlayId} · {connection}
-            </p>
-          </div>
-          <Link className="button" to={overlay ? `/overlay/${overlay.publicId}` : "#"} target="_blank" rel="noreferrer">
-            Open output
-          </Link>
-        </div>
-        {error ? (
-          <div className="error" role="alert">
-            {error}
-          </div>
-        ) : null}
-        <div className="overlay-test-frame">
-          {overlay ? <OverlayRenderer type={overlay.type} state={overlay.state} serverTimeMs={overlay.serverTimeMs} safeArea /> : null}
-        </div>
-      </div>
-    );
-  }
-
-  if (overlay?.type === "church" && isChurchState(overlay.state) && ["projector", "stage"].includes(searchParams.get("display") ?? "")) {
-    const mode = searchParams.get("display") === "stage" ? "stage" : "projector";
-    const content =
-      mode === "stage" ? (
-        <ChurchStageScreen state={overlay.state} serverTimeMs={overlay.serverTimeMs} connected={connection === "connected"} />
-      ) : (
-        <OverlayRenderer type="church" state={overlay.state} serverTimeMs={overlay.serverTimeMs} />
-      );
-    return client === "preview" ? (
-      <main className="church-display church-display-projector" aria-label="Projector output">
-        {content}
-      </main>
-    ) : (
-      <ChurchDisplay mode={mode}>{content}</ChurchDisplay>
-    );
-  }
-  return (
-    <div className="overlay-page">
-      {overlay ? <OverlayRenderer type={overlay.type} state={overlay.state} serverTimeMs={overlay.serverTimeMs} /> : null}
-      {error ? <span style={{ color: "transparent" }}>{error}</span> : null}
-    </div>
-  );
-}
-
 function demoSoccerState(): SoccerState {
   const state = createDefaultSoccerState("District Championship");
   state.score.home = 2;
@@ -4640,10 +3835,6 @@ function isChurchState(state: PresetState): state is ChurchState {
 function getPresetRevision(preset: PresetSummary): number | undefined {
   const revision = (preset as PresetSummary & { revision?: unknown }).revision;
   return typeof revision === "number" && Number.isInteger(revision) && revision >= 0 ? revision : undefined;
-}
-
-function dispatchPresetDeleted(payload: PresetDeletedEvent): void {
-  window.dispatchEvent(new CustomEvent(PRESET_DELETED_UI_EVENT, { detail: payload }));
 }
 
 function requestProgrammaticNavigation(): boolean {
