@@ -2,29 +2,22 @@
 
 ## Verified production state, 2026-09-23
 
-- The original checkout at `/Users/skylarenns/Desktop/OpenOverlay` still has its 41 preexisting entries and was not used for releases. Draft PR #21 contains the repair branch.
-- The stable backup runner is installed under `/usr/local/libexec/openoverlay`. Its daily timer is enabled and active. Snapshots use `/mnt/evenbiggerboi/openoverlay-backups`; the initial snapshot and isolated restore passed. Predeploy snapshots also passed verification. Operator status is `/var/lib/openoverlay/backup-status.json`.
-- The immutable gateway/backend runs epoch-zero release `840f3751fa9994d6423d82eb46924494d46c8e8b` as `skylarenns:openoverlay`, using the existing `/var/lib/openoverlay` database and uploads. Its manifest records schema and reader version 3. The database passed `PRAGMA integrity_check`; no privacy cutover marker exists.
-- Deliberate startup-failure release `1d464bce3fdf49b738d8e2f3132b91fe91ff2867` passed its build and isolated restore, failed gateway startup, and automatically rolled back to `840f375`. The predeploy snapshot `20260923T210015-044Z-predeploy-840f3751fa99` verifies after rollback. This rehearsal branch must never be merged or promoted as an application release.
-- The public frontend remains at `6e45c4c7755b6d4f1ee4e605ecd780999ca7ff8f`. Vercel project `open-overlay-frontend` has `autoAssignCustomDomains=false`, verified through the project API, so a `main` push cannot assign its production custom domain ahead of backend compatibility. Git preview deployment remains enabled.
+- The original checkout at `/Users/skylarenns/Desktop/OpenOverlay` still has its 41 preexisting entries and was not used for releases. PR #21 and the control-socket correction in PR #22 are merged.
+- The stable backup runner is installed under `/usr/local/libexec/openoverlay`. The daily timer is enabled and active. Snapshots use `/mnt/evenbiggerboi/openoverlay-backups`; both the initial and predeploy snapshots passed isolated restore. Operator status at `/var/lib/openoverlay/backup-status.json` reports a successful backup, no failure, and no overdue condition.
+- The immutable gateway/backend runs `528010fc6324d15423713a77f478911f933d9beb` as `skylarenns:openoverlay`, using the existing database and uploads under `/var/lib/openoverlay`. The database is schema 5 with `PRAGMA integrity_check=ok`; both existing presets have stage keys. The privacy cutover marker exists. Never start an epoch-zero backend against this database again.
+- The frontend custom domain, gateway, and backend all report `528010f`; `npm run check:deployments` passed. `/health` advertises `features.stage` and `features.mutationReceipts`. Vercel project `open-overlay-frontend` retains `autoAssignCustomDomains=false`, so promotion remains an explicit step.
+- Production public and stage HTTP/socket requests were checked against an existing soccer preset: public and valid stage requests succeeded; missing/invalid stage keys failed closed. Production currently has no church preset. Church draft redaction, stage-key rotation, and socket revocation passed integration tests but still need a live church workflow check with an authorized operator account.
+- The clean Node 24 CI run for PR #22 and merged `main` passed 172 backend, 118 frontend, and 15 shared tests, build/config/lint/format/type checks, 34 Chromium scenarios, security checks, and Linux systemd verification. Three WebKit operator workflows passed separately. No physical device result is claimed.
 
-The transient frontend/backend commit mismatch is expected during this infrastructure rehearsal. Do not call the rollout complete until the final production identities agree.
+The first frontend deploy built a verified candidate but stopped before promotion because Vercel CLI 55 forwarded `--scope` to curl. A one-time guarded run checked the candidate routes, assets, security headers, build identity, backend compatibility, and prior deployment, then promoted it. PR #23 repairs the source deployment script and ignores Vercel-generated local files. Require its full CI before merging.
 
-## Complete the application cutover
+## Remaining acceptance
 
-1. Review and merge PR #21. Require the full clean Node 24 CI suite on the resulting `main` SHA. The local repair branch had a green full CI run at `a1be2502e55766c291bd3c39fdc7ecef717a8c8e`; any later source or documentation commit needs a new run.
-2. Record the exact merged SHA and build a Git archive from it. Verify its SHA-256 and embedded Git commit before copying it to the host. The installed `/usr/local/sbin/openoverlay-deploy` checks both again.
-3. Confirm `openoverlay-deploy status` reports a healthy gateway/child, zero overlay and stage displays, and zero in-flight mutations. The command takes a verified predeploy snapshot and tests an isolated restore before promotion. Deploy the backend archive as root:
+1. With an authorized operator session, verify production church audience and stage outputs, stage rotation/revocation, and authenticated mutations. Existing soccer production was checked without changing presets.
+2. Confirm OBS/projector output and operator workflows on physical Safari, phone, tablet, keyboard, reduced-motion, light/dark, and 720p–4K devices in [RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md). Browser automation does not prove hardware output.
+3. Keep automatic custom-domain assignment disabled. Future frontend releases use a clean `main` checkout and `VERCEL_TEAM=skylar-enns-projects bash scripts/deploy-frontend-vercel.sh`; verify matching identities and backup status after each promotion.
 
-   ```bash
-   /usr/local/sbin/openoverlay-deploy deploy "$release_sha" "$archive_sha256" < "$archive_path"
-   ```
-
-4. Verify `/health` and `/_openoverlay/gateway` report the merged SHA and `features.stage`/`features.mutationReceipts`. The first stage release sets `/var/lib/openoverlay/privacy-cutover` before startup. From that point, never restart or roll back to an epoch-zero backend that exposes full church state. If startup fails, recover forward using the verified snapshot and a fixed stage-capable release.
-5. From a clean `main` checkout at the same SHA, use Node 24 and run `VERCEL_TEAM=skylar-enns-projects bash scripts/deploy-frontend-vercel.sh`. It builds a production candidate with `--skip-domain`, checks routes, assets, headers, build identity, and backend compatibility, then promotes it. It records the prior deployment and attempts exact restoration if promotion fails. Keep automatic custom-domain assignment disabled for this controlled workflow.
-6. Require `npm run check:deployments` to report the same SHA for the frontend, gateway, and backend. Test authenticated mutations, public audience HTTP/socket projection, stage-key access and revocation, and OBS-compatible output. Confirm backup timer and operator status again.
-
-Physical OBS/projector output, Safari, VoiceOver, phone, tablet, and device checks in [RELEASE_CHECKLIST.md](../RELEASE_CHECKLIST.md) remain a separate acceptance gate. The browser suites do not prove those hardware results.
+The deliberate startup-failure release `1d464bce3fdf49b738d8e2f3132b91fe91ff2867` rolled back to healthy epoch-zero release `840f3751fa9994d6423d82eb46924494d46c8e8b` before privacy cutover. Its rehearsal branch must never be merged or promoted as an application release.
 
 ## Recovery rules
 

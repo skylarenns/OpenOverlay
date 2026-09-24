@@ -17,3 +17,5 @@ uploads/
 *.sqlite-wal
 *.db
 *.tgz
+.vercel
+.env*
