@@ -12,12 +12,10 @@ if [[ -f "$BACKUP_CONFIG_FILE" ]]; then
 fi
 readonly BACKUP_ROOT="${OPENOVERLAY_BACKUP_ROOT:-${configured_backup_root:-/var/backups/openoverlay}}"
 readonly BACKUP_SCRIPT="${OPENOVERLAY_BACKUP_SCRIPT:-/usr/local/libexec/openoverlay/openoverlay-backup.mjs}"
-readonly IMMUTABLE_CONTROL_SOCKET="/run/openoverlay/gateway-control.sock"
+readonly IMMUTABLE_CONTROL_SOCKET="${OPENOVERLAY_IMMUTABLE_CONTROL_SOCKET:-/run/openoverlay/gateway-control.sock}"
 readonly LEGACY_CONTROL_SOCKET="${OPENOVERLAY_LEGACY_CONTROL_SOCKET:-/run/user/$(id -u skylarenns 2>/dev/null || printf 1000)/openoverlay/gateway-control.sock}"
 select_control_socket() {
-  if [[ -S "$IMMUTABLE_CONTROL_SOCKET" ]]; then
-    printf '%s' "$IMMUTABLE_CONTROL_SOCKET"
-  elif [[ ! -L "$RELEASE_ROOT/current" && -S "$LEGACY_CONTROL_SOCKET" ]]; then
+  if [[ ! -L "$CURRENT_LINK" && -S "$LEGACY_CONTROL_SOCKET" ]]; then
     printf '%s' "$LEGACY_CONTROL_SOCKET"
   else
     printf '%s' "$IMMUTABLE_CONTROL_SOCKET"
