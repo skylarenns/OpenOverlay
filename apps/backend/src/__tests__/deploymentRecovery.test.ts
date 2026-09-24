@@ -19,18 +19,34 @@ describe("immutable release recovery", () => {
     const fixture = createFixture();
     fs.unlinkSync(path.join(fixture.directory, "current"));
     const legacySocket = `/tmp/oo-legacy-${process.pid}-${Date.now()}.sock`;
+    const immutableSocket = `/tmp/oo-immutable-${process.pid}-${Date.now()}.sock`;
     const server = net.createServer();
-    await new Promise<void>((resolve, reject) => server.once("error", reject).listen(legacySocket, resolve));
+    const immutableServer = net.createServer();
+    await Promise.all([
+      new Promise<void>((resolve, reject) => server.once("error", reject).listen(legacySocket, resolve)),
+      new Promise<void>((resolve, reject) => immutableServer.once("error", reject).listen(immutableSocket, resolve))
+    ]);
     try {
       const result = runFixture(fixture, 'printf "%s" "$CONTROL_SOCKET"', true, {
         OPENOVERLAY_CONTROL_SOCKET: "",
-        OPENOVERLAY_LEGACY_CONTROL_SOCKET: legacySocket
+        OPENOVERLAY_LEGACY_CONTROL_SOCKET: legacySocket,
+        OPENOVERLAY_IMMUTABLE_CONTROL_SOCKET: immutableSocket
       });
       expect(result.status).toBe(0);
       expect(result.stdout).toBe(legacySocket);
+      fs.symlinkSync(fixture.oldRelease, path.join(fixture.directory, "current"));
+      const active = runFixture(fixture, 'printf "%s" "$CONTROL_SOCKET"', true, {
+        OPENOVERLAY_CONTROL_SOCKET: "",
+        OPENOVERLAY_LEGACY_CONTROL_SOCKET: legacySocket,
+        OPENOVERLAY_IMMUTABLE_CONTROL_SOCKET: immutableSocket
+      });
+      expect(active.status).toBe(0);
+      expect(active.stdout).toBe(immutableSocket);
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
+      await new Promise<void>((resolve) => immutableServer.close(() => resolve()));
       fs.rmSync(legacySocket, { force: true });
+      fs.rmSync(immutableSocket, { force: true });
     }
   });
 
