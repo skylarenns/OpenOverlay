@@ -47,7 +47,11 @@ API_URL="${VITE_API_BASE_URL:-https://openoverlayapi.skylarenns.com}"
 WEBSOCKET_URL="${VITE_WS_URL:-wss://openoverlayapi.skylarenns.com}"
 
 vercel_scoped() {
-  if [[ -n "${VERCEL_TEAM}" ]]; then
+  # Vercel CLI 55 passes --scope through to curl, even as a global option.
+  # The project is linked above, so curl can resolve its scope without it.
+  if [[ "$1" == "curl" ]]; then
+    vercel "$@"
+  elif [[ -n "${VERCEL_TEAM}" ]]; then
     vercel "$@" --scope "${VERCEL_TEAM}"
   else
     vercel "$@"
