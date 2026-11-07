@@ -1,17 +1,20 @@
 # OpenOverlay
 
+> Production migrated on 2026-11-06. The live frontend is [openoverlay.skylar.sh](https://openoverlay.skylar.sh), backed by the shared [skylar.sh monorepo](https://github.com/skylarenns/skylar.sh). This standalone repository is a development/reference source; it is not the source of the currently deployed production artifact. See [production deployment and rollback](docs/production-domain-migration.md) before deploying.
+
 OpenOverlay is a production-oriented livestream graphics app intended to replace Singular Live-style soccer overlays first, while also supporting church / ProPresenter-like presentation presets and future livestream graphics.
 
 The frontend is a React + Vite app for Vercel. The backend is a Node.js + TypeScript API/WebSocket server with SQLite persistence, disk media uploads, email/password auth, and Socket.IO realtime overlay updates.
 
 ## URLs
 
-- Frontend: `https://openoverlay.skylarenns.com`
-- Backend API/WebSocket: `https://openoverlayapi.skylarenns.com`
-- Admin dashboard: `https://openoverlay.skylarenns.com/dash`
-- Login: `https://openoverlay.skylarenns.com/login`
-- OBS browser source: `https://openoverlay.skylarenns.com/overlay/:overlayId`
-- Overlay test page: `https://openoverlay.skylarenns.com/overlay-test/:overlayId`
+- Frontend: `https://openoverlay.skylar.sh`
+- Shared API/WebSocket origin used by the frontend: `https://cloud-api.skylar.sh`
+- Flat API aliases: `https://openoverlay-api.skylar.sh`, `https://openoverlayapi.skylar.sh`
+- Legacy frontend: `https://openoverlay.skylarenns.com` remains available on its previous deployment and legacy API cookie origin.
+- Public OBS/output URLs should be copied from the running application; changing a hostname does not translate obsolete standalone API paths.
+
+The following stack, local commands and standalone API examples describe this repository. Production uses the platform product namespace; do not assume the old `/api/v1` or standalone authentication contract is served by the new aliases.
 
 ## Stack
 
@@ -101,7 +104,7 @@ Use `.env.example` as the placeholder reference. Do not commit real secrets.
 ## OBS Setup
 
 1. Add a Browser Source in OBS.
-2. Use `https://openoverlay.skylarenns.com/overlay/:overlayId`.
+2. Use `https://openoverlay.skylar.sh/overlay/:overlayId`.
 3. Set source width/height to the stream resolution, for example `1920x1080`.
 4. Keep the page background transparent. If needed, enable transparent background/custom CSS in OBS.
 5. Refresh browser cache if an old frontend build is stuck.
@@ -142,125 +145,13 @@ Agents making coordinated frontend/backend contract changes must check `packages
 
 When bumping either version, update backend `/health`, frontend build metadata, versioned API route tests, realtime tests, and deployment/gateway compatibility tests in the same change.
 
-## Backend Deployment
+## Production deployment and operations
 
-The live backend runs from the Git checkout on `shhh.skylarenns.com`. Deploy the current GitHub `main` with:
+Use the [production migration runbook](docs/production-domain-migration.md). The former standalone port 8734, `Openoverlaybackend` service, `cloudflared-openoverlay` tunnel, and this repository's deploy scripts are not the accepted production deployment path.
 
-The repair rollout uses the staged [backup and immutable activation procedure](docs/repair-rollout.md). The command below is the current legacy path until that rehearsal succeeds.
+The active backend runs in the skylar.sh platform on Main port 47834. New flat API aliases reuse the existing Cloud API tunnel. The Vercel frontend was published from a verified production artifact with a narrowly tested domain transform because its exact source commit was unavailable. Automatic Git builds are intentionally ignored until source parity is restored; do not override this with a deploy from this checkout.
 
-```bash
-npm run deploy:backend
-```
-
-The script connects as the normal configured SSH user, fetches the exact current `origin/main` SHA, installs pinned dependencies, builds shared/backend code, restarts the user-owned backend process, and verifies `/health` reports that SHA. Local uncommitted files are irrelevant because deployment always comes from GitHub.
-
-If the new process does not become healthy, the script rolls back automatically only when the database schema stayed unchanged. If a migration advanced the schema, it keeps the new checkout and requires forward recovery rather than starting incompatible old code. Override `SSH_TARGET`, `REMOTE_REPO_DIR`, `REMOTE_DATABASE_PATH`, or `DEPLOY_SHA` only when intentionally targeting a different host, checkout, database, or full Git SHA.
-
-`SHARE_LOOKUP_SECRET` is optional. When omitted, the backend derives a domain-separated lookup key from the required strong `JWT_SECRET`; an explicit independent 32-byte value remains supported.
-
-Manual service checks:
-
-```bash
-curl http://127.0.0.1:8734/health
-sudo systemctl status Openoverlaybackend
-sudo journalctl -u Openoverlaybackend --no-pager -n 100
-tail -n 100 /var/log/openoverlay/backend.log
-```
-
-The frontend publishes `/build-info.json`, the backend includes build metadata in `/health`, and the gateway publishes its own and its active child's identity at `/_openoverlay/gateway`. The app warns when the frontend and backend commits differ. `npm run check:deployments` verifies that the frontend, gateway process, and active backend all report the same commit. Override the checked URLs with `FRONTEND_URL=` and `BACKEND_URL=` when needed.
-
-## Cloudflare Tunnel
-
-Desired hostname: `openoverlayapi.skylarenns.com`
-
-Desired local service:
-
-```text
-http://127.0.0.1:8734
-```
-
-If the deployment script reports Cloudflare auth is missing, run this on the server:
-
-```bash
-cloudflared tunnel login
-```
-
-Then rerun:
-
-```bash
-npm run deploy:backend
-```
-
-Verify:
-
-```bash
-cloudflared tunnel list
-cloudflared tunnel info openoverlay-api
-curl https://openoverlayapi.skylarenns.com/health
-```
-
-## Vercel Frontend Deployment
-
-The frontend app lives in `apps/frontend`.
-
-Required production env vars:
-
-```text
-VITE_API_BASE_URL=https://openoverlayapi.skylarenns.com
-VITE_WS_URL=wss://openoverlayapi.skylarenns.com
-```
-
-If Vercel CLI is authenticated:
-
-```bash
-bash scripts/deploy-frontend-vercel.sh
-```
-
-Manual Vercel setup:
-
-```bash
-cd apps/frontend
-vercel login
-vercel link
-vercel env add VITE_API_BASE_URL production
-vercel env add VITE_WS_URL production
-vercel deploy --prod
-```
-
-Set the production domain to `openoverlay.skylarenns.com` in Vercel.
-
-## Troubleshooting
-
-Overlay not updating:
-
-- Confirm the admin status shows WebSocket connected.
-- Open `/overlay-test/:overlayId` and check the connection status.
-- Check `VITE_WS_URL` and backend `CORS_ORIGINS`.
-- Verify the backend health endpoint.
-
-WebSocket disconnected:
-
-- Check Cloudflare Tunnel status.
-- Check `journalctl -u Openoverlaybackend --no-pager -n 100`.
-- Confirm the frontend is using `wss://openoverlayapi.skylarenns.com`.
-
-CORS errors:
-
-- Add the exact frontend origin to `CORS_ORIGINS` in `/etc/openoverlaybackend.env`.
-- Restart `Openoverlaybackend`.
-
-Cloudflare tunnel down:
-
-```bash
-sudo systemctl status cloudflared-openoverlay.service
-sudo journalctl -u cloudflared-openoverlay.service --no-pager -n 100
-cloudflared tunnel list
-```
-
-Vercel env mismatch:
-
-- Confirm `VITE_API_BASE_URL` and `VITE_WS_URL` are set for production.
-- Redeploy after changing env vars.
+For production CORS, cookies, CSRF and realtime failures, inspect the platform's exact-origin policy and host-aware frontend API selection. Preserve the legacy frontend/API pair for existing browser sessions. Do not weaken CORS or copy secrets into frontend environment variables.
 
 ## Repository Layout
 
